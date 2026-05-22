@@ -22,12 +22,13 @@ def run(
     repo: SheetsRepository | None = None,
     dry_run: bool = False,
     document_id: str | None = None,
+    ocr_hints: dict | None = None,
 ) -> Invoice:
     repo = repo or SheetsRepository()
     two_plus = repo.two_plus_children()
     persons  = repo.persons.get_all()
 
-    fields = enter_invoice(persons, two_plus_children=two_plus)
+    fields = enter_invoice(persons, two_plus_children=two_plus, ocr_hints=ocr_hints or {})
     if document_id:
         fields["document_id"] = document_id
     invoice = Invoice(**fields)

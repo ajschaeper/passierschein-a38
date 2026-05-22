@@ -120,41 +120,99 @@ def enter_person() -> dict:
                 birth_date=birth_date, role=role)
 
 
-def enter_invoice(persons: list, two_plus_children: bool) -> dict:
-    """Interactive form for a new invoice. Returns a dict of field values."""
+def _parse_ocr_date(raw: Optional[str]) -> Optional[date]:
+    """Parse YYYY-MM-DD or YYYY-MM from OCR output."""
+    if not raw:
+        return None
+    try:
+        if len(raw) == 7:          # YYYY-MM → use first of month
+            return date.fromisoformat(raw + "-01")
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _match_person_by_name(patient_name: str, persons: list) -> Optional[int]:
+    """Return 0-based index of the best-matching person, or None."""
+    name_lower = patient_name.lower()
+    for i, p in enumerate(persons):
+        if p.first_name.lower() in name_lower or p.family_name.lower() in name_lower:
+            return i
+    return None
+
+
+def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None = None) -> dict:
+    """Interactive form for a new invoice. Returns a dict of field values.
+
+    If ocr_hints is provided (from claude_ocr.extract_invoice_data), each field
+    is pre-populated from the OCR result and the user can confirm or correct it.
+    """
     from passierschein.domain.enums import SplitType, PatientRole
     from passierschein.domain.split_matrix import matrix
 
+    ocr = ocr_hints or {}
+    ocr_tag = " [dim](OCR)[/dim]" if ocr else ""
+
     console.rule("[bold cyan]New Invoice")
 
-    # Person selection
+    # Person selection — try to auto-match from OCR patient name
     if not persons:
         raise ValueError("No persons configured. Run setup first.")
+
+    ocr_person_idx = None
+    if ocr.get("patient_name"):
+        ocr_person_idx = _match_person_by_name(ocr["patient_name"], persons)
+
     t = Table(show_lines=False, box=None)
     t.add_column("#")
     t.add_column("Name")
     t.add_column("Role")
     for i, p in enumerate(persons, 1):
-        t.add_row(str(i), f"{p.first_name} {p.family_name}", str(p.role))
+        marker = " ← OCR match" if ocr_person_idx is not None and i - 1 == ocr_person_idx else ""
+        t.add_row(str(i), f"{p.first_name} {p.family_name}{marker}", str(p.role))
     console.print(t)
-    idx = int(Prompt.ask("Select person", default="1")) - 1
+    default_person = str((ocr_person_idx or 0) + 1)
+    idx    = int(Prompt.ask("Select person", default=default_person)) - 1
     person = persons[idx]
 
-    split_type = prompt_enum("Split type", SplitType, default=SplitType.CLASSIC)
-    provider   = Prompt.ask("Provider", default=random.choice(_PROVIDERS))
+    # Split type — from OCR hint
+    split_type_map = {
+        "classic":        SplitType.CLASSIC,
+        "beihilfe_only":  SplitType.BEIHILFE_ONLY,
+        "direct_billing": SplitType.DIRECT_BILLING,
+    }
+    default_split = split_type_map.get(ocr.get("split_type_hint", ""), SplitType.CLASSIC)
+    split_type = prompt_enum(f"Split type{ocr_tag}", SplitType, default=default_split)
+
+    # Provider
+    default_provider = ocr.get("provider") or random.choice(_PROVIDERS)
+    provider = Prompt.ask(f"Provider{ocr_tag if ocr.get('provider') else ''}", default=default_provider)
+
+    # Dates
+    ocr_service_date  = _parse_ocr_date(ocr.get("date_of_service"))
+    ocr_received_date = _parse_ocr_date(ocr.get("date_of_invoice"))
 
     date_of_service = prompt_date(
-        "Date of service", default=date.today() - timedelta(days=random.randint(3, 30))
+        f"Date of service{ocr_tag if ocr_service_date else ''}",
+        default=ocr_service_date or (date.today() - timedelta(days=random.randint(3, 30))),
     )
     date_received = prompt_date(
-        "Date received", default=date_of_service + timedelta(days=random.randint(1, 10))
+        f"Date received{ocr_tag if ocr_received_date else ''}",
+        default=ocr_received_date or (date_of_service + timedelta(days=random.randint(1, 10))),
     )
     due_date = prompt_optional_date(
         "Due date (payment deadline)",
         default=date_received + timedelta(days=30),
     )
 
-    total_amount = prompt_amount("Total amount (EUR)", default=Decimal(str(round(random.uniform(50.0, 500.0), 2))))
+    # Amount
+    from passierschein.adapters.claude_ocr import parse_german_amount
+    ocr_amount = parse_german_amount(str(ocr.get("total_amount", "") or "")) if ocr.get("total_amount") else None
+    default_amount = ocr_amount or Decimal(str(round(random.uniform(50.0, 500.0), 2)))
+    total_amount = prompt_amount(
+        f"Total amount (EUR){ocr_tag if ocr_amount else ''}",
+        default=default_amount,
+    )
 
     # Split resolution
     role  = PatientRole(person.role)
@@ -163,8 +221,6 @@ def enter_invoice(persons: list, two_plus_children: bool) -> dict:
     pkv_expected      = cents(total_amount * split.pkv_pct)
     beihilfe_expected = cents(total_amount * split.beihilfe_pct)
 
-    # For direct_billing the provider already received the PKV portion;
-    # the employee only pays the Beihilfe share.
     if split_type == SplitType.DIRECT_BILLING:
         employee_net_expected = beihilfe_expected
     else:
