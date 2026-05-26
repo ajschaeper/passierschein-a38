@@ -187,15 +187,16 @@ def ocr_file(
     file: str = typer.Argument(..., help="PDF or image file to extract"),
     raw: bool = typer.Option(False, "--raw", help="Print raw JSON instead of formatted table"),
 ) -> None:
-    """Run Claude OCR on an invoice file and display extracted fields."""
+    """Auto-detect and extract an invoice or settlement report, display results."""
+    import json as _json
     from rich.console import Console
     from rich.table import Table
-    from passierschein.adapters.claude_ocr import extract_invoice_data
+    from passierschein.adapters.claude_ocr import extract_document_data
     console = Console()
 
     console.print(f"[dim]Extracting from [bold]{file}[/bold]…[/dim]")
     try:
-        data = extract_invoice_data(file)
+        data = extract_document_data(file)
     except FileNotFoundError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
@@ -204,36 +205,81 @@ def ocr_file(
         raise typer.Exit(1)
 
     if raw:
-        import json
-        console.print_json(json.dumps(data, indent=2, default=str))
+        console.print_json(_json.dumps(data, indent=2, default=str))
         return
 
-    t = Table(title=f"OCR — {Path(file).name}", show_lines=True)
-    t.add_column("Field", style="bold")
-    t.add_column("Extracted value")
+    doc_type = data.get("document_type", "invoice")
 
-    field_labels = [
-        ("provider",         "Provider"),
-        ("patient_name",     "Patient"),
-        ("date_of_service",  "Date of service"),
-        ("date_of_invoice",  "Date of invoice"),
-        ("total_amount",     "Total amount"),
-        ("split_type_hint",  "Split type hint"),
-        ("invoice_type_hint","Invoice type hint"),
-        ("invoice_number",   "Invoice number"),
-        ("notes",            "Notes"),
-    ]
-    for key, label in field_labels:
-        val = data.get(key)
-        if val is not None and val != "":
-            t.add_row(label, str(val))
+    if doc_type == "settlement_report":
+        # ── Header fields ──────────────────────────────────────────────
+        h = Table(title=f"OCR — {Path(file).name}  [settlement report]", show_lines=True)
+        h.add_column("Field", style="bold"); h.add_column("Value")
+        for key, label in [
+            ("report_type",      "Type"),
+            ("report_reference", "Reference"),
+            ("beihilfe_number",  "Beihilfe-Nr."),
+            ("date",             "Date"),
+            ("recipient_name",   "Recipient"),
+            ("total_granted",    "Total granted (€)"),
+        ]:
+            val = data.get(key)
+            if val is not None:
+                h.add_row(label, str(val))
+        console.print(h)
 
-    line_items = data.get("line_items") or []
-    if line_items:
-        for i, li in enumerate(line_items, 1):
-            t.add_row(f"  Line item {i}", f"{li.get('description', '')}  €{li.get('amount', '')}")
+        # ── Line items ─────────────────────────────────────────────────
+        items = data.get("line_items") or []
+        if items:
+            lt = Table(
+                title=f"{len(items)} line item(s)",
+                show_lines=True,
+                show_header=True,
+            )
+            lt.add_column("Beleg", style="bold")
+            lt.add_column("Person")
+            lt.add_column("Date")
+            lt.add_column("Description")
+            lt.add_column("Total €", justify="right")
+            lt.add_column("BH %", justify="right")
+            lt.add_column("Submitted €", justify="right")
+            lt.add_column("Granted €", justify="right")
+            lt.add_column("Deductible €", justify="right")
+            lt.add_column("Notes")
+            for li in items:
+                lt.add_row(
+                    str(li.get("beleg_nr", "")),
+                    str(li.get("person", "")),
+                    str(li.get("invoice_date") or ""),
+                    (li.get("description") or "")[:40],
+                    str(li.get("total_amount") or ""),
+                    str(li.get("beihilfe_pct") or ""),
+                    str(li.get("amount_submitted") or ""),
+                    str(li.get("amount_granted") or ""),
+                    str(li.get("deductible") or "0.00"),
+                    (li.get("notes") or "")[:60],
+                )
+            console.print(lt)
 
-    console.print(t)
+    else:
+        # ── Invoice ────────────────────────────────────────────────────
+        t = Table(title=f"OCR — {Path(file).name}  [invoice]", show_lines=True)
+        t.add_column("Field", style="bold"); t.add_column("Extracted value")
+        for key, label in [
+            ("provider",          "Provider"),
+            ("patient_name",      "Patient"),
+            ("date_of_service",   "Date of service"),
+            ("date_of_invoice",   "Date of invoice"),
+            ("due_date",          "Due date"),
+            ("total_amount",      "Total amount (€)"),
+            ("split_type_hint",   "Split type"),
+            ("invoice_type_hint", "Invoice type"),
+            ("invoice_number",    "Invoice number"),
+            ("notes",             "Notes"),
+        ]:
+            val = data.get(key)
+            if val is not None and val != "":
+                t.add_row(label, str(val))
+        console.print(t)
 
 
 if __name__ == "__main__":

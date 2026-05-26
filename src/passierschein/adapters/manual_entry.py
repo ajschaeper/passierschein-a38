@@ -250,13 +250,51 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     )
 
 
-def enter_settlement_report(document_id: Optional[str] = None) -> dict:
+def enter_settlement_report(
+    document_id: Optional[str] = None,
+    ocr_hints: Optional[dict] = None,
+) -> dict:
     from passierschein.domain.enums import PaymentStatus, SettlementReportLineItemsStatus
+    from passierschein.adapters.claude_ocr import parse_german_amount
+
+    ocr = ocr_hints or {}
+    ocr_tag = " [dim](OCR)[/dim]" if ocr else ""
+
     console.rule("[bold cyan]New Settlement Report")
-    rtype    = Prompt.ask("Type", default=random.choice(["pkv", "beihilfe"]))
-    ref      = Prompt.ask("Report reference", default=f"REF-{random.randint(10000,99999)}")
-    received = prompt_date("Received at")
-    total    = prompt_amount("Total reimbursed (EUR)", default=Decimal("0.00"))
+
+    # Show OCR line items summary if available
+    if ocr.get("line_items"):
+        items = ocr["line_items"]
+        t = Table(title=f"OCR extracted {len(items)} line item(s)", show_lines=False, box=None)
+        t.add_column("Beleg"); t.add_column("Person"); t.add_column("Description")
+        t.add_column("Total", justify="right"); t.add_column("%", justify="right")
+        t.add_column("Granted", justify="right")
+        for li in items:
+            t.add_row(
+                str(li.get("beleg_nr", "")),
+                str(li.get("person", "")),
+                (li.get("description") or "")[:35],
+                f"€{li.get('total_amount', '?')}",
+                f"{li.get('beihilfe_pct', '?')}%",
+                f"€{li.get('amount_granted', '?')}",
+            )
+        console.print(t)
+
+    default_type = (ocr.get("report_type") or random.choice(["pkv", "beihilfe"]))
+    rtype = Prompt.ask(f"Type (pkv/beihilfe){ocr_tag if ocr.get('report_type') else ''}", default=default_type)
+
+    default_ref = ocr.get("report_reference") or f"REF-{random.randint(10000,99999)}"
+    ref = Prompt.ask(f"Report reference{ocr_tag if ocr.get('report_reference') else ''}", default=default_ref)
+
+    ocr_date = _parse_ocr_date(ocr.get("date"))
+    received = prompt_date(f"Received at{ocr_tag if ocr_date else ''}", default=ocr_date or date.today())
+
+    ocr_total = parse_german_amount(str(ocr.get("total_granted") or "")) if ocr.get("total_granted") else None
+    total = prompt_amount(
+        f"Total reimbursed (EUR){ocr_tag if ocr_total else ''}",
+        default=ocr_total or Decimal("0.00"),
+    )
+
     return dict(
         type=rtype, report_reference=ref, received_at=received,
         total_reimbursed=total, document_id=document_id,

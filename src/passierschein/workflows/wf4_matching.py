@@ -78,12 +78,13 @@ def _update_beihilfe_deductible(deductible_applied: Decimal, year: int, repo: Sh
 def process_report(
     repo: SheetsRepository | None = None,
     document_id: str | None = None,
+    ocr_hints: dict | None = None,
 ) -> SettlementReport:
     repo = repo or SheetsRepository()
     console.rule("[bold blue]WF-4 Step A — Settlement Report")
 
-    # 1. Enter report metadata
-    fields = enter_settlement_report(document_id=document_id)
+    # 1. Enter report metadata (pre-filled from OCR if available)
+    fields = enter_settlement_report(document_id=document_id, ocr_hints=ocr_hints or {})
     report = SettlementReport(**fields)
 
     # 2. Show open invoices of this type to match against

@@ -1,9 +1,13 @@
 """
-Invoice extraction via Claude (multimodal).
+Document extraction via Claude (multimodal).
 
-Sends a PDF or image to Claude and extracts structured invoice data.
-Returns a dict ready to hydrate an Invoice model (minus split percentages,
-which are resolved separately by the split matrix).
+Auto-detects document type and applies the appropriate schema:
+  - invoice      → Rechnung / Honorarrechnung from doctor / hospital / pharmacy
+  - settlement_report → Beihilfebescheid / PKV Leistungsabrechnung
+
+Entry points:
+  extract_document_data(file_path)   — auto-detect, returns {"document_type": ..., ...}
+  extract_invoice_data(file_path)    — backward-compatible alias (asserts invoice type)
 """
 from __future__ import annotations
 
@@ -11,7 +15,6 @@ import base64
 import json
 import logging
 import re
-from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -22,52 +25,126 @@ from ..config import config
 
 log = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT = """\
-You are a precise data extraction assistant. Extract the following fields from this German medical invoice (Rechnung/Honorarrechnung).
 
-Return ONLY a JSON object with these keys — no prose, no markdown, no explanation:
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
+INVOICE_PROMPT = """\
+You are a precise data extraction assistant. Extract the following fields from this \
+German medical invoice (Rechnung / Honorarrechnung).
+
+Return ONLY a JSON object — no prose, no markdown, no explanation:
 
 {
+  "document_type": "invoice",
   "date_of_service": "YYYY-MM-DD or YYYY-MM (if only month known) or null",
   "date_of_invoice": "YYYY-MM-DD or null",
   "due_date": "YYYY-MM-DD or null",
   "provider": "name of the doctor, hospital, or pharmacy",
-  "patient_name": "name of the PATIENT (the person who received treatment), not the billing address",
-  "total_amount": "decimal number as string, e.g. '142.50'",
-  "invoice_type_hint": "one of: ambulant | stationaer | dental_basic | zahnersatz | kfo | psychotherapy | hilfsmittel | arzneimittel | heilmittel | other",
-  "split_type_hint": "classic (employee paid full invoice, claims PKV+Beihilfe) | beihilfe_only (no PKV) | direct_billing (PKV billed to provider, invoice is Beihilfe portion only)",
-  "invoice_number": "invoice/Rechnungsnummer if present, else null",
-  "line_items": [
-    {"description": "...", "amount": "decimal string"}
-  ],
-  "notes": "any relevant details (e.g. Beleg-Nr, GOÄ codes, partial invoice indicator) — keep brief"
+  "patient_name": "name of the PATIENT who received treatment — see rules below",
+  "total_amount": "decimal string, e.g. '142.50'",
+  "invoice_type_hint": "ambulant | stationaer | dental_basic | zahnersatz | kfo | psychotherapy | hilfsmittel | arzneimittel | heilmittel | other",
+  "split_type_hint": "classic | beihilfe_only | direct_billing",
+  "invoice_number": "Rechnungsnummer or null",
+  "notes": "brief note (GOÄ codes, partial invoice, etc.) or null"
 }
 
 Rules:
-- Amounts in German format (1.234,56) must be converted to standard decimal (1234.56)
-- due_date: look for fields labelled 'Bitte zahlen Sie bis', 'Zahlungsziel', 'zahlbar bis', 'fällig am', or 'Fälligkeitsdatum'. If only payment terms like '30 Tage' are given, compute due_date = date_of_invoice + those days.
-- patient_name: the person who physically received treatment. German medical invoices may contain three distinct names: (1) Rechnungsempfänger = billing address (often a parent or guardian), (2) Versicherter = insurance holder, (3) the actual patient, labelled 'Name:', 'Patient:', or 'Behandelter:' near the diagnosis/service section. Use (3) when present. Only fall back to (2) or (1) if no separate patient field exists. Example: if billing address is "Schäper, Ilka" but a 'Name: Schäper, Maja' line appears in the invoice body with a birth date, the patient is Maja.
-- split_type_hint detection — use 'direct_billing' when ANY of these signals are present:
-  (a) Explicit label: 'Beihilfeanteil', 'Anteil für Beihilfe', 'Beihilfefähiger Anteil', 'gemäß Beihilfesatz'
-  (b) Line items systematically show a percentage factor before the amount, e.g. '80 bis 1.847,56' or '70 bis 234,00' — this means the Beihilfe percentage (80% or 70%) has been applied to each item; PKV was billed separately
-  (c) A percentage column (e.g. 'Faktor: 0.8' or '80%') appears on most line items
-  Use 'beihilfe_only' only when there is no PKV involvement at all (e.g. patient has no PKV, SplitType is Beihilfe-only).
-  Use 'classic' when the full invoice amount is billed to the employee (no percentage reduction applied by the provider).
-- For date_of_service: use the date of treatment, not the invoice date. If multiple service dates, use the earliest.
-- invoice_type_hint: use 'stationaer' for hospital stays (Krankenhaus, Klinik), 'dental_basic' for dental (Zahnarzt) unless clearly prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy (Apotheke)
-- Return null for any field you cannot determine with confidence
-- line_items: include at most 10 items; if there are more, summarise the remainder as a single "Weitere Positionen" entry
-- Be concise — the entire JSON response must fit within 2000 tokens
+- Amounts in German format (1.234,56) → convert to standard decimal (1234.56)
+- due_date: look for 'Bitte zahlen Sie bis', 'Zahlungsziel', 'zahlbar bis', 'fällig am'. \
+If only payment terms like '30 Tage' are stated, compute due_date = date_of_invoice + those days.
+- patient_name: German invoices have three distinct names — (1) Rechnungsempfänger (billing \
+address, often a parent/guardian), (2) Versicherter (insurance holder), (3) actual patient \
+labelled 'Name:', 'Patient:', or 'Behandelter:' near the service/diagnosis section. \
+Use (3) when present; fall back to (2) then (1). Example: billing address 'Schäper, Ilka' \
+but 'Name: Schäper, Maja' with a birth date in the body → patient is Maja.
+- split_type_hint: use 'direct_billing' when ANY signal is present — \
+(a) labels 'Beihilfeanteil', 'Anteil für Beihilfe', 'gemäß Beihilfesatz'; \
+(b) line items show percentage factor e.g. '80 bis 1.847,56' (Beihilfe % applied per line, PKV billed separately); \
+(c) 'Faktor: 0.8' or '80%' column across most items. \
+Use 'beihilfe_only' when no PKV at all. Use 'classic' for full invoice billed to employee.
+- date_of_service: date of treatment (not invoice date); if multiple dates, use earliest.
+- invoice_type_hint: 'stationaer' for hospital stays, 'dental_basic' for Zahnarzt unless \
+prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy.
+- Return null for any field you cannot determine with confidence.
+- Do NOT include line_items — they are not needed for invoices.
+- Keep notes brief. Total response must fit within 1000 tokens.
 """
 
+SETTLEMENT_REPORT_PROMPT = """\
+You are a precise data extraction assistant. Extract all data from this German \
+Beihilfebescheid or PKV Leistungsabrechnung (settlement report).
+
+The document has two parts:
+  1. Cover letter pages — narrative text explaining decisions per Beleg-Nr., \
+including rejection reasons, partial eligibility, legal references.
+  2. Berechnung / Abrechnung table — one row per Beleg-Nr. with amounts.
+
+Return ONLY a JSON object — no prose, no markdown, no explanation:
+
+{
+  "document_type": "settlement_report",
+  "report_type": "beihilfe | pkv",
+  "report_reference": "Antragsnummer or report number as string",
+  "beihilfe_number": "Beihilfenummer / Versicherungsnummer or null",
+  "date": "YYYY-MM-DD (Bescheiddatum / Abrechnungsdatum)",
+  "recipient_name": "name of the Beihilfeberechtigter / policyholder",
+  "total_granted": "decimal string — Überweisungsbetrag / total reimbursed",
+  "line_items": [
+    {
+      "beleg_nr": "document/invoice reference number as string",
+      "person": "A (employee) | K1 | K2 | K3 (children) | S (spouse) or as labelled",
+      "invoice_date": "YYYY-MM-DD or null",
+      "description": "Leistungsart / service description",
+      "total_amount": "decimal string — Rechnungsbetrag (full invoice amount)",
+      "beihilfe_pct": "integer — v.H. percentage (e.g. 70 or 80)",
+      "amount_submitted": "decimal string — beihilfefähiger Abrechnungsbetrag \
+(amount submitted for Beihilfe, after PKV/Versicherungsleistung deduction)",
+      "amount_granted": "decimal string — anteilige Beihilfe (amount actually granted)",
+      "deductible": "decimal string — Eigenanteil / Zuschuss / Einbehalt (default '0.00')",
+      "notes": "any explanation from the cover letter for this Beleg-Nr. — \
+e.g. rejection reason, legal reference, partial eligibility. null if none."
+    }
+  ]
+}
+
+Rules:
+- Amounts in German format (1.234,56) → standard decimal (1234.56)
+- Extract EVERY row from the Berechnung table — do not truncate or summarise.
+- For each line item, scan the cover letter pages for references to that Beleg-Nr. \
+and include the relevant explanation in 'notes' (1–2 sentences max).
+- If a Beleg-Nr. appears in the cover letter only (rejected entirely, not in table), \
+still include it as a line item with amount_granted='0.00' and the rejection reason in notes.
+- person codes: 'A' = Antragsteller/employee, 'K1'/'K2'/etc. = children (Kind), \
+'S' or 'E' = Ehegatte/spouse. Use whatever code appears in the document.
+- report_type: 'beihilfe' for Beihilfebescheid from Bezirksregierung/Beihilfestelle; \
+'pkv' for PKV Leistungsabrechnung/Erstattungsbescheid from a private insurer.
+- Return null for any field you cannot determine.
+"""
+
+DETECT_PROMPT = """\
+Look at this document. Is it:
+(A) An INVOICE (Rechnung, Honorarrechnung) — issued by a doctor, hospital, pharmacy, or therapist, \
+requesting payment from the patient.
+(B) A SETTLEMENT REPORT (Beihilfebescheid, Leistungsabrechnung, Erstattungsbescheid) — issued by \
+a Beihilfestelle (Bezirksregierung) or private insurer (PKV), confirming what they will reimburse.
+
+Reply with exactly one word: invoice  OR  settlement_report
+"""
+
+
+# ---------------------------------------------------------------------------
+# Core helpers
+# ---------------------------------------------------------------------------
 
 def _encode_file(path: Path) -> tuple[str, str]:
     """Return (base64_data, media_type) for a PDF or image file."""
     suffix = path.suffix.lower()
     media_types = {
-        ".pdf": "application/pdf",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
+        ".pdf":  "application/pdf",
+        ".png":  "image/png",
+        ".jpg":  "image/jpeg",
         ".jpeg": "image/jpeg",
         ".webp": "image/webp",
     }
@@ -78,76 +155,133 @@ def _encode_file(path: Path) -> tuple[str, str]:
     return data, media_type
 
 
+def _build_content(data: str, media_type: str, prompt: str) -> list:
+    if media_type == "application/pdf":
+        return [
+            {"type": "document", "source": {"type": "base64", "media_type": media_type, "data": data}},
+            {"type": "text", "text": prompt},
+        ]
+    return [
+        {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
+        {"type": "text", "text": prompt},
+    ]
+
+
+def _call_claude(content: list, max_tokens: int) -> str:
+    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    response = client.messages.create(
+        model="claude-opus-4-5",
+        max_tokens=max_tokens,
+        messages=[{"role": "user", "content": content}],
+    )
+    raw = response.content[0].text.strip()
+    log.debug("Claude raw response: %s", raw)
+
+    if response.stop_reason == "max_tokens":
+        log.warning("Response truncated (max_tokens=%d) — attempting JSON recovery", max_tokens)
+        raw = _close_truncated_json(raw)
+
+    return raw
+
+
+def _parse_json(raw: str) -> Dict[str, Any]:
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+    return json.loads(raw)
+
+
+def _close_truncated_json(raw: str) -> str:
+    """Best-effort repair of a JSON string cut off mid-stream."""
+    lines = raw.rstrip().splitlines()
+    if lines and not lines[-1].rstrip().endswith((",", "}", "]", '"', "null", "true", "false")):
+        lines = lines[:-1]
+    partial = "\n".join(lines).rstrip().rstrip(",")
+    depth_curly  = partial.count("{") - partial.count("}")
+    depth_square = partial.count("[") - partial.count("]")
+    partial += "]" * max(depth_square, 0)
+    partial += "}" * max(depth_curly, 0)
+    return partial
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def detect_document_type(file_path: str | Path) -> str:
+    """Return 'invoice' or 'settlement_report' by asking Claude."""
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    data, media_type = _encode_file(path)
+    content = _build_content(data, media_type, DETECT_PROMPT)
+    raw = _call_claude(content, max_tokens=10)
+    doc_type = raw.strip().lower()
+    if "settlement" in doc_type:
+        return "settlement_report"
+    return "invoice"
+
+
+def extract_document_data(file_path: str | Path) -> Dict[str, Any]:
+    """
+    Auto-detect document type and extract structured data.
+
+    Returns a dict with 'document_type' as the first key, then either
+    invoice fields or settlement report fields.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    data, media_type = _encode_file(path)
+    log.info("Extracting from %s (%s)", path.name, media_type)
+
+    # Step 1: detect type
+    detect_content = _build_content(data, media_type, DETECT_PROMPT)
+    type_raw = _call_claude(detect_content, max_tokens=10).strip().lower()
+    is_settlement = "settlement" in type_raw
+    log.info("Detected document type: %s", "settlement_report" if is_settlement else "invoice")
+
+    # Step 2: extract with the right prompt and token budget
+    prompt     = SETTLEMENT_REPORT_PROMPT if is_settlement else INVOICE_PROMPT
+    max_tokens = 4096 if is_settlement else 1024
+
+    extract_content = _build_content(data, media_type, prompt)
+    raw = _call_claude(extract_content, max_tokens=max_tokens)
+    extracted = _parse_json(raw)
+
+    if is_settlement:
+        log.info(
+            "Settlement report: ref=%s, total=%s, %d line items",
+            extracted.get("report_reference"),
+            extracted.get("total_granted"),
+            len(extracted.get("line_items") or []),
+        )
+    else:
+        log.info(
+            "Invoice: provider=%s, amount=%s, type=%s",
+            extracted.get("provider"),
+            extracted.get("total_amount"),
+            extracted.get("invoice_type_hint"),
+        )
+    return extracted
+
+
 def extract_invoice_data(file_path: str | Path) -> Dict[str, Any]:
     """
-    Send an invoice file to Claude and return extracted fields as a dict.
-
-    Returns a dict with keys matching the JSON schema above.
-    Raises on API error or unparseable response.
+    Backward-compatible entry point: extracts invoice data directly
+    (skips auto-detection, uses the invoice prompt).
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Invoice file not found: {path}")
 
     data, media_type = _encode_file(path)
-    client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+    log.info("Extracting invoice from %s (%s)", path.name, media_type)
 
-    log.info("Extracting invoice data from %s (%s)", path.name, media_type)
-
-    if media_type == "application/pdf":
-        # Use the document source type for PDFs
-        content = [
-            {
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                },
-            },
-            {
-                "type": "text",
-                "text": EXTRACTION_PROMPT,
-            },
-        ]
-    else:
-        content = [
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": media_type,
-                    "data": data,
-                },
-            },
-            {
-                "type": "text",
-                "text": EXTRACTION_PROMPT,
-            },
-        ]
-
-    response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=2048,
-        messages=[{"role": "user", "content": content}],
-    )
-
-    raw = response.content[0].text.strip()
-    log.debug("Claude raw response: %s", raw)
-
-    # Strip markdown fences if present
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
-
-    # If the response was truncated (stop_reason == "max_tokens"), attempt
-    # to salvage it by closing any open string/array/object so json.loads
-    # has a chance of succeeding on the fields that did arrive.
-    if response.stop_reason == "max_tokens":
-        log.warning("Response was truncated (max_tokens hit) — attempting recovery")
-        raw = _close_truncated_json(raw)
-
-    extracted: Dict[str, Any] = json.loads(raw)
+    content = _build_content(data, media_type, INVOICE_PROMPT)
+    raw = _call_claude(content, max_tokens=1024)
+    extracted = _parse_json(raw)
     log.info(
         "Extracted: provider=%s, amount=%s, type=%s",
         extracted.get("provider"),
@@ -155,34 +289,6 @@ def extract_invoice_data(file_path: str | Path) -> Dict[str, Any]:
         extracted.get("invoice_type_hint"),
     )
     return extracted
-
-
-def _close_truncated_json(raw: str) -> str:
-    """
-    Best-effort repair of a JSON string that was cut off mid-stream.
-
-    Strategy:
-    1. Drop the last (incomplete) line — it's almost always the broken one.
-    2. Strip trailing commas left by the dropped line.
-    3. Close any open arrays and objects in reverse order.
-    """
-    lines = raw.rstrip().splitlines()
-
-    # Drop the last line if it doesn't end with a complete JSON value token
-    if lines and not lines[-1].rstrip().endswith((",", "}", "]", '"', "null", "true", "false")):
-        lines = lines[:-1]
-
-    partial = "\n".join(lines).rstrip().rstrip(",")
-
-    # Count open brackets/braces to figure out what needs closing
-    depth_curly  = partial.count("{") - partial.count("}")
-    depth_square = partial.count("[") - partial.count("]")
-
-    # Close open arrays first (they're nested inside the object)
-    partial += "]" * max(depth_square, 0)
-    partial += "}" * max(depth_curly, 0)
-
-    return partial
 
 
 def parse_german_amount(amount_str: str) -> Optional[Decimal]:
@@ -193,7 +299,6 @@ def parse_german_amount(amount_str: str) -> Optional[Decimal]:
     if not amount_str:
         return None
     s = str(amount_str).strip().replace(" ", "").replace("€", "").replace("EUR", "")
-    # German format: dot as thousands separator, comma as decimal
     if "," in s:
         s = s.replace(".", "").replace(",", ".")
     try:
