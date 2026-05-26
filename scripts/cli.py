@@ -99,10 +99,18 @@ def list_persons() -> None:
 @app.command("add-document")
 def add_document(
     file: Optional[str] = typer.Option(None, "--file", "-f", help="Local file path (skips Drive picker)"),
+    all_inbox: bool = typer.Option(False, "--all", help="Process every file in the Drive Inbox"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
-    """Drive picker → OCR → auto-classify → Invoice or Settlement Report."""
-    wf_add_document.run(repo=SheetsRepository(), local_file=file, dry_run=dry_run)
+    """Drive picker → OCR → auto-classify → Invoice or Settlement Report.
+
+    Use --all to process every file currently in the Inbox in one batch.
+    """
+    repo = SheetsRepository()
+    if all_inbox:
+        wf_add_document.run_batch(repo=repo)
+    else:
+        wf_add_document.run(repo=repo, local_file=file, dry_run=dry_run)
 
 
 @app.command("set-paid-out")

@@ -48,10 +48,10 @@ _DEFAULTS: Dict[Tuple[PatientRole, SplitType], SplitEntry] = {
     (PatientRole.EMPLOYEE, SplitType.CLASSIC):        _e("0.50"),
     (PatientRole.SPOUSE,   SplitType.CLASSIC):        _e("0.70"),
     (PatientRole.CHILD,    SplitType.CLASSIC):        _e("0.80"),
-    # direct_billing uses the same role-based percentages as classic
-    (PatientRole.EMPLOYEE, SplitType.DIRECT_BILLING): _e("0.50"),
-    (PatientRole.SPOUSE,   SplitType.DIRECT_BILLING): _e("0.70"),
-    (PatientRole.CHILD,    SplitType.DIRECT_BILLING): _e("0.80"),
+    # direct_billing: the invoice IS already the Beihilfe portion → 100% Beihilfe, 0% PKV
+    (PatientRole.EMPLOYEE, SplitType.DIRECT_BILLING): _e("1.00"),
+    (PatientRole.SPOUSE,   SplitType.DIRECT_BILLING): _e("1.00"),
+    (PatientRole.CHILD,    SplitType.DIRECT_BILLING): _e("1.00"),
     # beihilfe_only is 100% Beihilfe for all roles
     (PatientRole.EMPLOYEE, SplitType.BEIHILFE_ONLY):  _e("1.00"),
     (PatientRole.SPOUSE,   SplitType.BEIHILFE_ONLY):  _e("1.00"),

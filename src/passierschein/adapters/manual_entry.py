@@ -141,11 +141,34 @@ def _match_person_by_name(patient_name: str, persons: list) -> Optional[int]:
     return None
 
 
+def _conf(ocr: dict, field: str) -> str:
+    """
+    Return OCR confidence for a field: 'high', 'medium', or 'low'.
+
+    Convention: Claude only populates _confidence for fields that are NOT high,
+    so absence of a field inside _confidence means high confidence.
+
+    However, if _confidence is entirely missing from the OCR result (truncated
+    response, old model), we fall back to 'medium' rather than 'high' so nothing
+    is silently auto-accepted.
+    """
+    confidence_map = ocr.get("_confidence")
+    if confidence_map is None:
+        # _confidence block absent entirely → treat all fields as medium
+        return "medium"
+    return confidence_map.get(field, "high")
+
+
+def _auto(ocr: dict, field: str, value: object) -> bool:
+    """True when the field has a value and OCR confidence is high → auto-accept."""
+    return value is not None and value != "" and _conf(ocr, field) == "high"
+
+
 def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None = None) -> dict:
     """Interactive form for a new invoice. Returns a dict of field values.
 
-    If ocr_hints is provided (from claude_ocr.extract_invoice_data), each field
-    is pre-populated from the OCR result and the user can confirm or correct it.
+    High-confidence OCR fields are auto-accepted and shown but not prompted.
+    Medium/low-confidence fields are prompted with the OCR value as default.
     """
     from passierschein.domain.enums import SplitType, PatientRole
     from passierschein.domain.split_matrix import matrix
@@ -163,17 +186,25 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     if ocr.get("patient_name"):
         ocr_person_idx = _match_person_by_name(ocr["patient_name"], persons)
 
-    t = Table(show_lines=False, box=None)
-    t.add_column("#")
-    t.add_column("Name")
-    t.add_column("Role")
-    for i, p in enumerate(persons, 1):
-        marker = " ← OCR match" if ocr_person_idx is not None and i - 1 == ocr_person_idx else ""
-        t.add_row(str(i), f"{p.first_name} {p.family_name}{marker}", str(p.role))
-    console.print(t)
-    default_person = str((ocr_person_idx or 0) + 1)
-    idx    = int(Prompt.ask("Select person", default=default_person)) - 1
-    person = persons[idx]
+    # Auto-select when OCR patient_name confidence is high and a match was found
+    if ocr_person_idx is not None and _auto(ocr, "patient_name", ocr.get("patient_name")):
+        person = persons[ocr_person_idx]
+        console.print(
+            f"  Person [dim](OCR ✓)[/dim]: [bold]{person.first_name} {person.family_name}[/bold]"
+            f"  [dim]({person.role})[/dim]"
+        )
+    else:
+        t = Table(show_lines=False, box=None)
+        t.add_column("#")
+        t.add_column("Name")
+        t.add_column("Role")
+        for i, p in enumerate(persons, 1):
+            marker = " ← OCR match" if ocr_person_idx is not None and i - 1 == ocr_person_idx else ""
+            t.add_row(str(i), f"{p.first_name} {p.family_name}{marker}", str(p.role))
+        console.print(t)
+        default_person = str((ocr_person_idx or 0) + 1)
+        idx    = int(Prompt.ask("Select person", default=default_person)) - 1
+        person = persons[idx]
 
     # Split type — from OCR hint
     split_type_map = {
@@ -182,38 +213,64 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
         "direct_billing": SplitType.DIRECT_BILLING,
     }
     default_split = split_type_map.get(ocr.get("split_type_hint", ""), SplitType.CLASSIC)
-    split_type = prompt_enum(f"Split type{ocr_tag}", SplitType, default=default_split)
+    if _auto(ocr, "split_type_hint", ocr.get("split_type_hint")):
+        split_type = default_split
+        console.print(f"  Split type [dim](OCR ✓)[/dim]: {split_type.value}")
+    else:
+        split_type = prompt_enum(f"Split type{ocr_tag}", SplitType, default=default_split)
 
     # Provider
     default_provider = ocr.get("provider") or random.choice(_PROVIDERS)
-    provider = Prompt.ask(f"Provider{ocr_tag if ocr.get('provider') else ''}", default=default_provider)
+    if _auto(ocr, "provider", ocr.get("provider")):
+        provider = default_provider
+        console.print(f"  Provider [dim](OCR ✓)[/dim]: {provider}")
+    else:
+        provider = Prompt.ask(f"Provider{ocr_tag if ocr.get('provider') else ''}", default=default_provider)
 
     # Dates
     ocr_service_date  = _parse_ocr_date(ocr.get("date_of_service"))
     ocr_received_date = _parse_ocr_date(ocr.get("date_of_invoice"))
     ocr_due_date      = _parse_ocr_date(ocr.get("due_date"))
 
-    date_of_service = prompt_date(
-        f"Date of service{ocr_tag if ocr_service_date else ''}",
-        default=ocr_service_date or (date.today() - timedelta(days=random.randint(3, 30))),
-    )
-    date_received = prompt_date(
-        f"Date received{ocr_tag if ocr_received_date else ''}",
-        default=ocr_received_date or (date_of_service + timedelta(days=random.randint(1, 10))),
-    )
-    due_date = prompt_optional_date(
-        f"Due date (payment deadline){ocr_tag if ocr_due_date else ''}",
-        default=ocr_due_date or (date_received + timedelta(days=30)),
-    )
+    if _auto(ocr, "date_of_service", ocr_service_date):
+        date_of_service = ocr_service_date
+        console.print(f"  Date of service [dim](OCR ✓)[/dim]: {date_of_service}")
+    else:
+        date_of_service = prompt_date(
+            f"Date of service{ocr_tag if ocr_service_date else ''}",
+            default=ocr_service_date or (date.today() - timedelta(days=random.randint(3, 30))),
+        )
+
+    if _auto(ocr, "date_of_invoice", ocr_received_date):
+        date_received = ocr_received_date
+        console.print(f"  Date received [dim](OCR ✓)[/dim]: {date_received}")
+    else:
+        date_received = prompt_date(
+            f"Date received{ocr_tag if ocr_received_date else ''}",
+            default=ocr_received_date or (date_of_service + timedelta(days=random.randint(1, 10))),
+        )
+
+    if _auto(ocr, "due_date", ocr_due_date):
+        due_date = ocr_due_date
+        console.print(f"  Due date [dim](OCR ✓)[/dim]: {due_date}")
+    else:
+        due_date = prompt_optional_date(
+            f"Due date (payment deadline){ocr_tag if ocr_due_date else ''}",
+            default=ocr_due_date or (date_received + timedelta(days=30)),
+        )
 
     # Amount
     from passierschein.adapters.claude_ocr import parse_german_amount
     ocr_amount = parse_german_amount(str(ocr.get("total_amount", "") or "")) if ocr.get("total_amount") else None
     default_amount = ocr_amount or Decimal(str(round(random.uniform(50.0, 500.0), 2)))
-    total_amount = prompt_amount(
-        f"Total amount (EUR){ocr_tag if ocr_amount else ''}",
-        default=default_amount,
-    )
+    if _auto(ocr, "total_amount", ocr_amount):
+        total_amount = ocr_amount
+        console.print(f"  Total amount [dim](OCR ✓)[/dim]: €{total_amount}")
+    else:
+        total_amount = prompt_amount(
+            f"Total amount (EUR){ocr_tag if ocr_amount else ''}",
+            default=default_amount,
+        )
 
     # Split resolution
     role  = PatientRole(person.role)
@@ -223,16 +280,18 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     beihilfe_expected = cents(total_amount * split.beihilfe_pct)
 
     if split_type == SplitType.DIRECT_BILLING:
-        employee_net_expected = beihilfe_expected
+        # Invoice is already the Beihilfe portion; PKV billed separately
+        employee_net_expected = total_amount
+        console.print(
+            f"\n[bold]Direct billing[/bold] — 100% Beihilfe: €{beihilfe_expected}  "
+            f"[dim](PKV billed separately)[/dim]"
+        )
     else:
         employee_net_expected = total_amount
-
-    console.print(
-        f"\n[bold]Split:[/bold] PKV {split.pkv_pct:.0%} = €{pkv_expected}  |  "
-        f"Beihilfe {split.beihilfe_pct:.0%} = €{beihilfe_expected}"
-    )
-    if split_type == SplitType.DIRECT_BILLING:
-        console.print(f"[dim]Employee pays Beihilfe portion only: €{employee_net_expected}[/dim]")
+        console.print(
+            f"\n[bold]Split:[/bold] PKV {split.pkv_pct:.0%} = €{pkv_expected}  |  "
+            f"Beihilfe {split.beihilfe_pct:.0%} = €{beihilfe_expected}"
+        )
 
     return dict(
         person_id             = person.person_id,
@@ -378,37 +437,52 @@ def enter_bank_transaction() -> dict:
 
 
 def enter_document(drive_files: list[dict] | None = None) -> dict:
-    """Prompt for a new document record. Shows a Drive file picker if files are provided."""
+    """Prompt for a new document record. Shows a Drive file picker if files are provided.
+
+    When a Drive file is selected:
+    - captured_at is set automatically from the file's createdTime (no prompt)
+    - document_type is auto-accepted when inferred from a recognised subfolder name
+    """
     from passierschein.domain.enums import DocumentType
     console.rule("[bold cyan]New Document")
 
-    file_path: str = ""
-    default_type = DocumentType.UNKNOWN
+    file_path:       str              = ""
+    default_type:    DocumentType     = DocumentType.UNKNOWN
+    captured:        date | None      = None
+    type_confident:  bool             = False
 
     if drive_files:
-        t = Table(title="Files in Google Drive folder", show_lines=True)
+        t = Table(title="Files in Google Drive Inbox", show_lines=True)
         t.add_column("#", style="bold", justify="right")
         t.add_column("File name")
         t.add_column("Folder")
         t.add_column("Date", justify="right")
         for i, f in enumerate(drive_files, 1):
             t.add_row(str(i), f["name"], f.get("folder_path") or "", (f.get("createdTime") or "")[:10])
-        t.add_row("[dim]0[/dim]", "[dim]Enter local path manually[/dim]", "")
+        t.add_row("[dim]0[/dim]", "[dim]Enter local path manually[/dim]", "", "")
         console.print(t)
 
         raw = Prompt.ask("Pick a file # (or 0 for manual)", default="1")
         try:
             idx = int(raw)
             if 1 <= idx <= len(drive_files):
-                chosen = drive_files[idx - 1]
-                file_path = chosen["id"]
-                # Infer type from subfolder name, fall back to filename keywords
+                chosen      = drive_files[idx - 1]
+                file_path   = chosen["id"]
+
+                # captured_at from Drive createdTime
+                created_str = chosen.get("createdTime") or ""
+                if created_str:
+                    captured = date.fromisoformat(created_str[:10])
+                    console.print(f"  Captured at [dim](Drive ✓)[/dim]: {captured}")
+
+                # Type inference from subfolder — confident only for known folder names
                 folder_path = (chosen.get("folder_path") or "").lower()
                 name_lower  = chosen["name"].lower()
-                if "bescheid" in folder_path or "abrechnung" in folder_path or \
-                   any(kw in name_lower for kw in ("bescheid", "abrechnung", "erstattung", "leistung")):
-                    default_type = DocumentType.SETTLEMENT_REPORT
-                elif "pkv" in folder_path:
+                if "rechnungen" in folder_path:
+                    default_type, type_confident = DocumentType.INVOICE, True
+                elif any(kw in folder_path for kw in ("bescheid", "pkv-abrechnung", "pkv_abrechnung")):
+                    default_type, type_confident = DocumentType.SETTLEMENT_REPORT, True
+                elif any(kw in name_lower for kw in ("bescheid", "abrechnung", "erstattung", "leistung")):
                     default_type = DocumentType.SETTLEMENT_REPORT
                 else:
                     default_type = DocumentType.INVOICE
@@ -418,8 +492,17 @@ def enter_document(drive_files: list[dict] | None = None) -> dict:
     if not file_path:
         file_path = Prompt.ask("File path")
 
-    doc_type = prompt_enum("Document type", DocumentType, default=default_type)
-    captured = prompt_date("Captured at", default=date.today())
+    # doc_type: auto-accept if folder was unambiguous, otherwise prompt
+    if type_confident:
+        console.print(f"  Document type [dim](folder ✓)[/dim]: [bold]{default_type.value}[/bold]")
+        doc_type = default_type
+    else:
+        doc_type = prompt_enum("Document type", DocumentType, default=default_type)
+
+    # captured_at: already set from Drive, otherwise prompt
+    if captured is None:
+        captured = prompt_date("Captured at", default=date.today())
+
     return dict(
         file_path     = file_path,
         document_type = doc_type,

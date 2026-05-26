@@ -53,7 +53,8 @@ Return ONLY a JSON object — no prose, no markdown, no explanation:
 Rules:
 - Amounts in German format (1.234,56) → convert to standard decimal (1234.56)
 - due_date: look for 'Bitte zahlen Sie bis', 'Zahlungsziel', 'zahlbar bis', 'fällig am'. \
-If only payment terms like '30 Tage' are stated, compute due_date = date_of_invoice + those days.
+If only payment terms like '30 Tage' are stated, compute due_date = date_of_invoice + those days. \
+A date computed from explicit payment terms is deterministic — treat it as high confidence.
 - patient_name: German invoices have three distinct names — (1) Rechnungsempfänger (billing \
 address, often a parent/guardian), (2) Versicherter (insurance holder), (3) actual patient \
 labelled 'Name:', 'Patient:', or 'Behandelter:' near the service/diagnosis section. \
@@ -70,6 +71,9 @@ prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy.
 - Return null for any field you cannot determine with confidence.
 - Do NOT include line_items — they are not needed for invoices.
 - Keep notes brief. Total response must fit within 1000 tokens.
+- Add a "_confidence" key at the end: an object mapping field names to \
+"high" (clearly printed, unambiguous), "medium" (likely but inferred), or \
+"low" (guessed or unclear). Only include fields where confidence is not high.
 """
 
 SETTLEMENT_REPORT_PROMPT = """\
@@ -123,6 +127,8 @@ still include it as a line item with amount_granted='0.00' and the rejection rea
 - report_type: 'beihilfe' for Beihilfebescheid from Bezirksregierung/Beihilfestelle; \
 'pkv' for PKV Leistungsabrechnung/Erstattungsbescheid from a private insurer.
 - Return null for any field you cannot determine.
+- Add a "_confidence" key: object mapping field names to "high", "medium", or "low". \
+Only include fields where confidence is not high.
 """
 
 DETECT_PROMPT = """\

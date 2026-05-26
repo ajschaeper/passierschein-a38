@@ -18,7 +18,8 @@ from ..config import config
 
 log = logging.getLogger(__name__)
 
-_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+_SCOPES_RO = ["https://www.googleapis.com/auth/drive.readonly"]
+_SCOPES_RW = ["https://www.googleapis.com/auth/drive"]
 
 _MIME_TO_SUFFIX = {
     "application/pdf": ".pdf",
@@ -28,10 +29,11 @@ _MIME_TO_SUFFIX = {
 }
 
 
-def _service():
+def _service(write: bool = False):
     from googleapiclient.discovery import build
+    scopes = _SCOPES_RW if write else _SCOPES_RO
     creds = Credentials.from_service_account_file(
-        str(config.GOOGLE_CREDENTIALS_FILE), scopes=_SCOPES
+        str(config.GOOGLE_CREDENTIALS_FILE), scopes=scopes
     )
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
@@ -109,3 +111,68 @@ def download_to_temp(file_id: str, name: str | None = None) -> Path:
     tmp.close()
     log.info("Downloaded Drive:%s → %s (%d bytes)", file_id, tmp.name, buf.tell())
     return Path(tmp.name)
+
+
+def _find_subfolder(name: str, parent_id: str) -> str | None:
+    """Return the Drive folder ID of a direct child folder with the given name."""
+    result = _service().files().list(
+        q=(
+            f"'{parent_id}' in parents"
+            f" and name = '{name}'"
+            f" and mimeType = 'application/vnd.google-apps.folder'"
+            f" and trashed = false"
+        ),
+        fields="files(id)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
+        pageSize=5,
+    ).execute()
+    files = result.get("files", [])
+    return files[0]["id"] if files else None
+
+
+# Maps entity type strings to Drive subfolder names
+_SUBFOLDER: dict[str, str] = {
+    "invoice":            "Rechnungen",
+    "settlement_beihilfe": "Beihilfebescheide",
+    "settlement_pkv":     "PKV-Abrechnungen",
+}
+
+
+def move_to_archive(file_id: str, year: int, entity_type: str) -> bool:
+    """
+    Move a Drive file from the Inbox to Medikosten/<year>/<subfolder>.
+
+    entity_type: 'invoice' | 'settlement_beihilfe' | 'settlement_pkv'
+    Returns True on success, False if folder not found or IDs not configured.
+    """
+    inbox = config.DRIVE_INBOX_ID
+    root  = config.DRIVE_FOLDER_ID
+    if not file_id or not inbox or not root:
+        log.warning("move_to_archive: missing Drive IDs in config")
+        return False
+
+    subfolder_name = _SUBFOLDER.get(entity_type)
+    if not subfolder_name:
+        log.warning("move_to_archive: unknown entity_type %r", entity_type)
+        return False
+
+    year_id = _find_subfolder(str(year), root)
+    if not year_id:
+        log.warning("move_to_archive: year folder %d not found", year)
+        return False
+
+    dest_id = _find_subfolder(subfolder_name, year_id)
+    if not dest_id:
+        log.warning("move_to_archive: subfolder %s/%s not found", year, subfolder_name)
+        return False
+
+    _service(write=True).files().update(
+        fileId=file_id,
+        addParents=dest_id,
+        removeParents=inbox,
+        fields="id,parents",
+        supportsAllDrives=True,
+    ).execute()
+    log.info("Moved Drive:%s → %d/%s", file_id, year, subfolder_name)
+    return True

@@ -16,7 +16,7 @@ from datetime import date
 from rich.console import Console
 from rich.prompt import Prompt
 
-from ..adapters.drive import list_files as _list_drive_files
+from ..adapters.drive import list_files as _list_drive_files, move_to_archive as _move_to_archive
 from ..adapters.manual_entry import enter_document
 from ..adapters.sheets import SheetsRepository
 from ..domain.enums import DocumentStatus, DocumentType
@@ -59,21 +59,35 @@ def _resolve_type(document: Document, ocr_hints: dict) -> str:
     """
     Return 'invoice' or 'settlement_report'.
 
-    Priority: OCR result > picker folder inference > explicit user prompt.
+    Priority: OCR result (with confidence) > picker folder inference > explicit user prompt.
+    High confidence  → auto-accept, just print.
+    Medium confidence → show detected type, ask Y/n to confirm.
+    Low / absent OCR  → fall through to folder inference or explicit prompt.
     """
-    # 1. OCR told us
+    from rich.prompt import Confirm
+
     ocr_type = ocr_hints.get("document_type")
     if ocr_type in ("invoice", "settlement_report"):
-        return ocr_type
+        confidence_map = ocr_hints.get("_confidence")
+        # absent field inside the map = high; absent map entirely = medium (safe fallback)
+        confidence = confidence_map.get("document_type", "high") if confidence_map is not None else "medium"
+        if confidence == "high":
+            console.print(f"  Document type [dim](OCR ✓)[/dim]: [bold]{ocr_type}[/bold]")
+            return ocr_type
+        if confidence == "medium":
+            console.print(f"  Document type [dim](OCR ~)[/dim]: [bold]{ocr_type}[/bold]")
+            if Confirm.ask(f"Classify as {ocr_type}?", default=True):
+                return ocr_type
+        # low → fall through
 
-    # 2. Picker inferred from Drive folder name
+    # Folder inference (from Drive picker subfolder name — already high-confidence)
     doc_type = str(document.document_type)
     if doc_type in ("invoice", "settlement_report"):
+        console.print(f"  Document type [dim](folder ✓)[/dim]: [bold]{doc_type}[/bold]")
         return doc_type
 
-    # 3. Ask
-    raw = Prompt.ask("Document type", choices=["invoice", "settlement_report"], default="invoice")
-    return raw
+    # Explicit prompt as last resort
+    return Prompt.ask("Document type", choices=["invoice", "settlement_report"], default="invoice")
 
 
 def run(
@@ -118,12 +132,71 @@ def run(
             document.linked_entity_id = report.id
             document.status = DocumentStatus.PROCESSED
             repo.documents.update(document)
+            _archive(document.file_path, f"settlement_{report.type}", ocr_hints, report.received_at)
     else:
         from . import wf1_intake
         invoice = wf1_intake.run(repo=repo, dry_run=dry_run, document_id=document.id, ocr_hints=ocr_hints)
-        if not dry_run:
+        if not dry_run and invoice is not None:
             document.linked_entity_id = invoice.id
             document.status = DocumentStatus.PROCESSED
             repo.documents.update(document)
+            _archive(document.file_path, "invoice", ocr_hints, invoice.date_of_service)
 
     return document
+
+
+def run_batch(repo: SheetsRepository | None = None) -> list[Document]:
+    """Process every file currently in the Drive Inbox in sequence."""
+    repo = repo or SheetsRepository()
+    try:
+        drive_files = _list_drive_files()
+    except Exception as exc:
+        console.print(f"[red]Could not list Drive Inbox: {exc}[/red]")
+        return []
+
+    if not drive_files:
+        console.print("[yellow]Inbox is empty — nothing to import.[/yellow]")
+        return []
+
+    console.rule(f"[bold blue]Batch import — {len(drive_files)} file(s) in Inbox")
+    results: list[Document] = []
+    for i, f in enumerate(drive_files, 1):
+        console.rule(f"[dim]{i}/{len(drive_files)}: {f['name']}")
+        try:
+            doc = run(repo=repo, local_file=f["id"])
+            results.append(doc)
+        except Exception as exc:
+            console.print(f"[red]Failed: {exc}[/red]")
+
+    console.rule(f"[bold green]Batch complete — {len(results)}/{len(drive_files)} processed")
+    return results
+
+
+def _archive(file_path: str, entity_type: str, ocr_hints: dict, service_date: object) -> None:
+    """Move file from Drive Inbox to the correct year/type subfolder."""
+    from ..adapters.drive import is_drive_id
+    if not is_drive_id(file_path):
+        return  # local file, nothing to move
+
+    # Determine year from service date, fall back to OCR hints, fall back to today
+    year: int | None = None
+    if hasattr(service_date, "year"):
+        year = service_date.year
+    if not year:
+        for key in ("date_of_service", "invoice_date", "date"):
+            raw = ocr_hints.get(key)
+            if raw and len(str(raw)) >= 4:
+                try:
+                    year = int(str(raw)[:4])
+                    break
+                except ValueError:
+                    pass
+    if not year:
+        from datetime import date
+        year = date.today().year
+
+    ok = _move_to_archive(file_path, year, entity_type)
+    if ok:
+        console.print(f"[dim]Moved to archive: {year}/{entity_type}[/dim]")
+    else:
+        console.print(f"[dim]Could not move to archive (folder not found for {year}/{entity_type}).[/dim]")
