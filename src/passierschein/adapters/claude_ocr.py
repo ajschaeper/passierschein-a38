@@ -30,8 +30,9 @@ Return ONLY a JSON object with these keys — no prose, no markdown, no explanat
 {
   "date_of_service": "YYYY-MM-DD or YYYY-MM (if only month known) or null",
   "date_of_invoice": "YYYY-MM-DD or null",
+  "due_date": "YYYY-MM-DD or null",
   "provider": "name of the doctor, hospital, or pharmacy",
-  "patient_name": "name of the patient as written on the invoice",
+  "patient_name": "name of the PATIENT (the person who received treatment), not the billing address",
   "total_amount": "decimal number as string, e.g. '142.50'",
   "invoice_type_hint": "one of: ambulant | stationaer | dental_basic | zahnersatz | kfo | psychotherapy | hilfsmittel | arzneimittel | heilmittel | other",
   "split_type_hint": "classic (employee paid full invoice, claims PKV+Beihilfe) | beihilfe_only (no PKV) | direct_billing (PKV billed to provider, invoice is Beihilfe portion only)",
@@ -44,6 +45,8 @@ Return ONLY a JSON object with these keys — no prose, no markdown, no explanat
 
 Rules:
 - Amounts in German format (1.234,56) must be converted to standard decimal (1234.56)
+- due_date: look for fields labelled 'Bitte zahlen Sie bis', 'Zahlungsziel', 'zahlbar bis', 'fällig am', or 'Fälligkeitsdatum'. If only payment terms like '30 Tage' are given, compute due_date = date_of_invoice + those days.
+- patient_name: the person who physically received treatment. German medical invoices may contain three distinct names: (1) Rechnungsempfänger = billing address (often a parent or guardian), (2) Versicherter = insurance holder, (3) the actual patient, labelled 'Name:', 'Patient:', or 'Behandelter:' near the diagnosis/service section. Use (3) when present. Only fall back to (2) or (1) if no separate patient field exists. Example: if billing address is "Schäper, Ilka" but a 'Name: Schäper, Maja' line appears in the invoice body with a birth date, the patient is Maja.
 - If the invoice is labelled as a partial invoice for Beihilfe (e.g. 'Anteil für Beihilfe', 'Beihilfeanteil'), set split_type_hint to 'direct_billing'
 - For date_of_service: use the date of treatment, not the invoice date. If multiple service dates, use the earliest.
 - invoice_type_hint: use 'stationaer' for hospital stays (Krankenhaus, Klinik), 'dental_basic' for dental (Zahnarzt) unless clearly prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy (Apotheke)

@@ -191,6 +191,7 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     # Dates
     ocr_service_date  = _parse_ocr_date(ocr.get("date_of_service"))
     ocr_received_date = _parse_ocr_date(ocr.get("date_of_invoice"))
+    ocr_due_date      = _parse_ocr_date(ocr.get("due_date"))
 
     date_of_service = prompt_date(
         f"Date of service{ocr_tag if ocr_service_date else ''}",
@@ -201,8 +202,8 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
         default=ocr_received_date or (date_of_service + timedelta(days=random.randint(1, 10))),
     )
     due_date = prompt_optional_date(
-        "Due date (payment deadline)",
-        default=date_received + timedelta(days=30),
+        f"Due date (payment deadline){ocr_tag if ocr_due_date else ''}",
+        default=ocr_due_date or (date_received + timedelta(days=30)),
     )
 
     # Amount
