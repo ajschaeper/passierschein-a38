@@ -97,12 +97,14 @@ Return ONLY a JSON object — no prose, no markdown, no explanation:
       "person": "A (employee) | K1 | K2 | K3 (children) | S (spouse) or as labelled",
       "invoice_date": "YYYY-MM-DD or null",
       "description": "Leistungsart / service description",
-      "total_amount": "decimal string — Rechnungsbetrag (full invoice amount)",
-      "beihilfe_pct": "integer — v.H. percentage (e.g. 70 or 80)",
-      "amount_submitted": "decimal string — beihilfefähiger Abrechnungsbetrag \
-(amount submitted for Beihilfe, after PKV/Versicherungsleistung deduction)",
-      "amount_granted": "decimal string — anteilige Beihilfe (amount actually granted)",
-      "deductible": "decimal string — Eigenanteil / Zuschuss / Einbehalt (default '0.00')",
+      "total_amount": "decimal string — Rechnungsbetrag (column 'Rechnungsbetrag': full invoice amount)",
+      "beihilfe_pct": "integer — v.H. percentage from the 'v.H.' column (e.g. 70 or 80)",
+      "amount_eligible": "decimal string — beihilfefähiger Abrechnungsbetrag \
+(column 'Beihilfefähige Abrechnungsbetrag': the rate-cap-adjusted eligible amount, \
+INDEPENDENT of PKV; may be less than total_amount when a rate cap applies, \
+or 0.00 when the claim is rejected entirely)",
+      "amount_granted": "decimal string — anteilige Beihilfe \
+(column 'Anteilige Beihilfe': the amount Beihilfe actually pays = amount_eligible × beihilfe_pct%)",
       "notes": "any explanation from the cover letter for this Beleg-Nr. — \
 e.g. rejection reason, legal reference, partial eligibility. null if none."
     }
@@ -205,6 +207,42 @@ def _close_truncated_json(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Settlement report post-processing
+# ---------------------------------------------------------------------------
+
+def _compute_settlement_fields(report: Dict[str, Any]) -> None:
+    """
+    Add computed fields to each settlement report line item (mutates in place):
+
+      beihilfe_due  = total_amount × beihilfe_pct%
+                      (what Beihilfe should pay if no rate caps or rejections)
+
+      deductible    = beihilfe_due − amount_granted
+                      (employee's shortfall on the Beihilfe side)
+
+    These are computed in Python rather than relying on Claude arithmetic.
+    The table column 'amount_eligible' (beihilfefähiger Abrechnungsbetrag)
+    is what the insurer actually used for the calculation — it can be lower
+    than total_amount due to rate caps (Heilpraktiker, GOÄ multiplier limits)
+    or 0.00 for a fully rejected claim.
+    """
+    from decimal import ROUND_HALF_UP
+    q = Decimal("0.01")
+    for item in report.get("line_items") or []:
+        try:
+            total   = Decimal(str(item.get("total_amount")  or "0"))
+            pct     = Decimal(str(item.get("beihilfe_pct")  or "0")) / 100
+            granted = Decimal(str(item.get("amount_granted") or "0"))
+            due     = (total * pct).quantize(q, rounding=ROUND_HALF_UP)
+            item["beihilfe_due"] = str(due)
+            item["deductible"]   = str((due - granted).quantize(q, rounding=ROUND_HALF_UP))
+        except Exception as exc:
+            log.warning("Could not compute settlement fields for beleg %s: %s", item.get("beleg_nr"), exc)
+            item.setdefault("beihilfe_due", None)
+            item.setdefault("deductible",   None)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -251,6 +289,7 @@ def extract_document_data(file_path: str | Path) -> Dict[str, Any]:
     extracted = _parse_json(raw)
 
     if is_settlement:
+        _compute_settlement_fields(extracted)
         log.info(
             "Settlement report: ref=%s, total=%s, %d line items",
             extracted.get("report_reference"),

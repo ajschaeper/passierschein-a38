@@ -239,11 +239,12 @@ def ocr_file(
             lt.add_column("Person")
             lt.add_column("Date")
             lt.add_column("Description")
-            lt.add_column("Total €", justify="right")
+            lt.add_column("Invoice €", justify="right")
             lt.add_column("BH %", justify="right")
-            lt.add_column("Submitted €", justify="right")
+            lt.add_column("BH due €", justify="right")   # total × pct%
+            lt.add_column("Eligible €", justify="right") # after rate cap
             lt.add_column("Granted €", justify="right")
-            lt.add_column("Deductible €", justify="right")
+            lt.add_column("Deductible €", justify="right")  # BH due − granted
             lt.add_column("Notes")
             for li in items:
                 lt.add_row(
@@ -252,10 +253,11 @@ def ocr_file(
                     str(li.get("invoice_date") or ""),
                     (li.get("description") or "")[:40],
                     str(li.get("total_amount") or ""),
-                    str(li.get("beihilfe_pct") or ""),
-                    str(li.get("amount_submitted") or ""),
+                    f"{li.get('beihilfe_pct') or ''}%",
+                    str(li.get("beihilfe_due") or ""),   # computed
+                    str(li.get("amount_eligible") or ""),
                     str(li.get("amount_granted") or ""),
-                    str(li.get("deductible") or "0.00"),
+                    str(li.get("deductible") or ""),     # computed
                     (li.get("notes") or "")[:60],
                 )
             console.print(lt)
