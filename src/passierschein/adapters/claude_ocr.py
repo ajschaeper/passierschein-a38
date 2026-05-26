@@ -39,7 +39,7 @@ Return ONLY a JSON object with these keys — no prose, no markdown, no explanat
   "line_items": [
     {"description": "...", "amount": "decimal string"}
   ],
-  "notes": "any relevant details (e.g. Beleg-Nr, GOÄ codes, partial invoice indicator)"
+  "notes": "any relevant details (e.g. Beleg-Nr, GOÄ codes, partial invoice indicator) — keep brief"
 }
 
 Rules:
@@ -48,6 +48,8 @@ Rules:
 - For date_of_service: use the date of treatment, not the invoice date. If multiple service dates, use the earliest.
 - invoice_type_hint: use 'stationaer' for hospital stays (Krankenhaus, Klinik), 'dental_basic' for dental (Zahnarzt) unless clearly prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy (Apotheke)
 - Return null for any field you cannot determine with confidence
+- line_items: include at most 10 items; if there are more, summarise the remainder as a single "Weitere Positionen" entry
+- Be concise — the entire JSON response must fit within 2000 tokens
 """
 
 
@@ -118,7 +120,7 @@ def extract_invoice_data(file_path: str | Path) -> Dict[str, Any]:
 
     response = client.messages.create(
         model="claude-opus-4-5",
-        max_tokens=1024,
+        max_tokens=2048,
         messages=[{"role": "user", "content": content}],
     )
 
@@ -130,6 +132,13 @@ def extract_invoice_data(file_path: str | Path) -> Dict[str, Any]:
         raw = re.sub(r"^```(?:json)?\n?", "", raw)
         raw = re.sub(r"\n?```$", "", raw)
 
+    # If the response was truncated (stop_reason == "max_tokens"), attempt
+    # to salvage it by closing any open string/array/object so json.loads
+    # has a chance of succeeding on the fields that did arrive.
+    if response.stop_reason == "max_tokens":
+        log.warning("Response was truncated (max_tokens hit) — attempting recovery")
+        raw = _close_truncated_json(raw)
+
     extracted: Dict[str, Any] = json.loads(raw)
     log.info(
         "Extracted: provider=%s, amount=%s, type=%s",
@@ -138,6 +147,34 @@ def extract_invoice_data(file_path: str | Path) -> Dict[str, Any]:
         extracted.get("invoice_type_hint"),
     )
     return extracted
+
+
+def _close_truncated_json(raw: str) -> str:
+    """
+    Best-effort repair of a JSON string that was cut off mid-stream.
+
+    Strategy:
+    1. Drop the last (incomplete) line — it's almost always the broken one.
+    2. Strip trailing commas left by the dropped line.
+    3. Close any open arrays and objects in reverse order.
+    """
+    lines = raw.rstrip().splitlines()
+
+    # Drop the last line if it doesn't end with a complete JSON value token
+    if lines and not lines[-1].rstrip().endswith((",", "}", "]", '"', "null", "true", "false")):
+        lines = lines[:-1]
+
+    partial = "\n".join(lines).rstrip().rstrip(",")
+
+    # Count open brackets/braces to figure out what needs closing
+    depth_curly  = partial.count("{") - partial.count("}")
+    depth_square = partial.count("[") - partial.count("]")
+
+    # Close open arrays first (they're nested inside the object)
+    partial += "]" * max(depth_square, 0)
+    partial += "}" * max(depth_curly, 0)
+
+    return partial
 
 
 def parse_german_amount(amount_str: str) -> Optional[Decimal]:
