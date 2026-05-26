@@ -140,6 +140,18 @@ Reply with exactly one word: invoice  OR  settlement_report
 # Core helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_to_local(file_path: str | Path) -> tuple[Path, bool]:
+    """
+    If file_path is a Drive file ID, download it to a temp file.
+    Returns (local_path, is_temp) — caller must unlink if is_temp=True.
+    """
+    from .drive import is_drive_id, download_to_temp
+    s = str(file_path)
+    if is_drive_id(s):
+        return download_to_temp(s), True
+    return Path(s), False
+
+
 def _encode_file(path: Path) -> tuple[str, str]:
     """Return (base64_data, media_type) for a PDF or image file."""
     suffix = path.suffix.lower()
@@ -248,16 +260,18 @@ def _compute_settlement_fields(report: Dict[str, Any]) -> None:
 
 def detect_document_type(file_path: str | Path) -> str:
     """Return 'invoice' or 'settlement_report' by asking Claude."""
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
-    data, media_type = _encode_file(path)
-    content = _build_content(data, media_type, DETECT_PROMPT)
-    raw = _call_claude(content, max_tokens=10)
-    doc_type = raw.strip().lower()
-    if "settlement" in doc_type:
-        return "settlement_report"
-    return "invoice"
+    path, is_temp = _resolve_to_local(file_path)
+    try:
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+        data, media_type = _encode_file(path)
+        content = _build_content(data, media_type, DETECT_PROMPT)
+        raw = _call_claude(content, max_tokens=10)
+        doc_type = raw.strip().lower()
+        return "settlement_report" if "settlement" in doc_type else "invoice"
+    finally:
+        if is_temp:
+            path.unlink(missing_ok=True)
 
 
 def extract_document_data(file_path: str | Path) -> Dict[str, Any]:
@@ -266,68 +280,78 @@ def extract_document_data(file_path: str | Path) -> Dict[str, Any]:
 
     Returns a dict with 'document_type' as the first key, then either
     invoice fields or settlement report fields.
+    Accepts a local file path or a Google Drive file ID.
     """
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {path}")
+    path, is_temp = _resolve_to_local(file_path)
+    try:
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
 
-    data, media_type = _encode_file(path)
-    log.info("Extracting from %s (%s)", path.name, media_type)
+        data, media_type = _encode_file(path)
+        log.info("Extracting from %s (%s)", path.name, media_type)
 
-    # Step 1: detect type
-    detect_content = _build_content(data, media_type, DETECT_PROMPT)
-    type_raw = _call_claude(detect_content, max_tokens=10).strip().lower()
-    is_settlement = "settlement" in type_raw
-    log.info("Detected document type: %s", "settlement_report" if is_settlement else "invoice")
+        # Step 1: detect type
+        detect_content = _build_content(data, media_type, DETECT_PROMPT)
+        type_raw = _call_claude(detect_content, max_tokens=10).strip().lower()
+        is_settlement = "settlement" in type_raw
+        log.info("Detected document type: %s", "settlement_report" if is_settlement else "invoice")
 
-    # Step 2: extract with the right prompt and token budget
-    prompt     = SETTLEMENT_REPORT_PROMPT if is_settlement else INVOICE_PROMPT
-    max_tokens = 4096 if is_settlement else 1024
+        # Step 2: extract with the right prompt and token budget
+        prompt     = SETTLEMENT_REPORT_PROMPT if is_settlement else INVOICE_PROMPT
+        max_tokens = 4096 if is_settlement else 1024
 
-    extract_content = _build_content(data, media_type, prompt)
-    raw = _call_claude(extract_content, max_tokens=max_tokens)
-    extracted = _parse_json(raw)
+        extract_content = _build_content(data, media_type, prompt)
+        raw = _call_claude(extract_content, max_tokens=max_tokens)
+        extracted = _parse_json(raw)
 
-    if is_settlement:
-        _compute_settlement_fields(extracted)
-        log.info(
-            "Settlement report: ref=%s, total=%s, %d line items",
-            extracted.get("report_reference"),
-            extracted.get("total_granted"),
-            len(extracted.get("line_items") or []),
-        )
-    else:
-        log.info(
-            "Invoice: provider=%s, amount=%s, type=%s",
-            extracted.get("provider"),
-            extracted.get("total_amount"),
-            extracted.get("invoice_type_hint"),
-        )
-    return extracted
+        if is_settlement:
+            _compute_settlement_fields(extracted)
+            log.info(
+                "Settlement report: ref=%s, total=%s, %d line items",
+                extracted.get("report_reference"),
+                extracted.get("total_granted"),
+                len(extracted.get("line_items") or []),
+            )
+        else:
+            log.info(
+                "Invoice: provider=%s, amount=%s, type=%s",
+                extracted.get("provider"),
+                extracted.get("total_amount"),
+                extracted.get("invoice_type_hint"),
+            )
+        return extracted
+    finally:
+        if is_temp:
+            path.unlink(missing_ok=True)
 
 
 def extract_invoice_data(file_path: str | Path) -> Dict[str, Any]:
     """
     Backward-compatible entry point: extracts invoice data directly
     (skips auto-detection, uses the invoice prompt).
+    Accepts a local file path or a Google Drive file ID.
     """
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Invoice file not found: {path}")
+    path, is_temp = _resolve_to_local(file_path)
+    try:
+        if not path.exists():
+            raise FileNotFoundError(f"Invoice file not found: {path}")
 
-    data, media_type = _encode_file(path)
-    log.info("Extracting invoice from %s (%s)", path.name, media_type)
+        data, media_type = _encode_file(path)
+        log.info("Extracting invoice from %s (%s)", path.name, media_type)
 
-    content = _build_content(data, media_type, INVOICE_PROMPT)
-    raw = _call_claude(content, max_tokens=1024)
-    extracted = _parse_json(raw)
-    log.info(
-        "Extracted: provider=%s, amount=%s, type=%s",
-        extracted.get("provider"),
-        extracted.get("total_amount"),
-        extracted.get("invoice_type_hint"),
-    )
-    return extracted
+        content = _build_content(data, media_type, INVOICE_PROMPT)
+        raw = _call_claude(content, max_tokens=1024)
+        extracted = _parse_json(raw)
+        log.info(
+            "Extracted: provider=%s, amount=%s, type=%s",
+            extracted.get("provider"),
+            extracted.get("total_amount"),
+            extracted.get("invoice_type_hint"),
+        )
+        return extracted
+    finally:
+        if is_temp:
+            path.unlink(missing_ok=True)
 
 
 def parse_german_amount(amount_str: str) -> Optional[Decimal]:

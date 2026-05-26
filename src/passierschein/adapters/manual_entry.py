@@ -377,13 +377,49 @@ def enter_bank_transaction() -> dict:
     )
 
 
-def enter_document() -> dict:
-    """Prompt for a new document record."""
+def enter_document(drive_files: list[dict] | None = None) -> dict:
+    """Prompt for a new document record. Shows a Drive file picker if files are provided."""
     from passierschein.domain.enums import DocumentType
     console.rule("[bold cyan]New Document")
-    file_path = Prompt.ask("File path")
-    doc_type  = prompt_enum("Document type", DocumentType, default=DocumentType.UNKNOWN)
-    captured  = prompt_date("Captured at", default=date.today())
+
+    file_path: str = ""
+    default_type = DocumentType.UNKNOWN
+
+    if drive_files:
+        t = Table(title="Files in Google Drive folder", show_lines=True)
+        t.add_column("#", style="bold", justify="right")
+        t.add_column("File name")
+        t.add_column("Folder")
+        t.add_column("Date", justify="right")
+        for i, f in enumerate(drive_files, 1):
+            t.add_row(str(i), f["name"], f.get("folder_path") or "", (f.get("createdTime") or "")[:10])
+        t.add_row("[dim]0[/dim]", "[dim]Enter local path manually[/dim]", "")
+        console.print(t)
+
+        raw = Prompt.ask("Pick a file # (or 0 for manual)", default="1")
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(drive_files):
+                chosen = drive_files[idx - 1]
+                file_path = chosen["id"]
+                # Infer type from subfolder name, fall back to filename keywords
+                folder_path = (chosen.get("folder_path") or "").lower()
+                name_lower  = chosen["name"].lower()
+                if "bescheid" in folder_path or "abrechnung" in folder_path or \
+                   any(kw in name_lower for kw in ("bescheid", "abrechnung", "erstattung", "leistung")):
+                    default_type = DocumentType.SETTLEMENT_REPORT
+                elif "pkv" in folder_path:
+                    default_type = DocumentType.SETTLEMENT_REPORT
+                else:
+                    default_type = DocumentType.INVOICE
+        except (ValueError, IndexError):
+            pass
+
+    if not file_path:
+        file_path = Prompt.ask("File path")
+
+    doc_type = prompt_enum("Document type", DocumentType, default=default_type)
+    captured = prompt_date("Captured at", default=date.today())
     return dict(
         file_path     = file_path,
         document_type = doc_type,

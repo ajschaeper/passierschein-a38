@@ -25,6 +25,8 @@ class Config:
         os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
     )
     SPREADSHEET_ID: str = _require("SPREADSHEET_ID")
+    DRIVE_FOLDER_ID: str = os.getenv("DRIVE_FOLDER_ID", "")
+    DRIVE_INBOX_ID:  str = os.getenv("DRIVE_INBOX_ID",  "")
 
     # Alert thresholds
     BEIHILFE_ALERT_WEEKS: int = int(os.getenv("BEIHILFE_ALERT_WEEKS", "8"))
