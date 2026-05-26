@@ -47,7 +47,12 @@ Rules:
 - Amounts in German format (1.234,56) must be converted to standard decimal (1234.56)
 - due_date: look for fields labelled 'Bitte zahlen Sie bis', 'Zahlungsziel', 'zahlbar bis', 'fällig am', or 'Fälligkeitsdatum'. If only payment terms like '30 Tage' are given, compute due_date = date_of_invoice + those days.
 - patient_name: the person who physically received treatment. German medical invoices may contain three distinct names: (1) Rechnungsempfänger = billing address (often a parent or guardian), (2) Versicherter = insurance holder, (3) the actual patient, labelled 'Name:', 'Patient:', or 'Behandelter:' near the diagnosis/service section. Use (3) when present. Only fall back to (2) or (1) if no separate patient field exists. Example: if billing address is "Schäper, Ilka" but a 'Name: Schäper, Maja' line appears in the invoice body with a birth date, the patient is Maja.
-- If the invoice is labelled as a partial invoice for Beihilfe (e.g. 'Anteil für Beihilfe', 'Beihilfeanteil'), set split_type_hint to 'direct_billing'
+- split_type_hint detection — use 'direct_billing' when ANY of these signals are present:
+  (a) Explicit label: 'Beihilfeanteil', 'Anteil für Beihilfe', 'Beihilfefähiger Anteil', 'gemäß Beihilfesatz'
+  (b) Line items systematically show a percentage factor before the amount, e.g. '80 bis 1.847,56' or '70 bis 234,00' — this means the Beihilfe percentage (80% or 70%) has been applied to each item; PKV was billed separately
+  (c) A percentage column (e.g. 'Faktor: 0.8' or '80%') appears on most line items
+  Use 'beihilfe_only' only when there is no PKV involvement at all (e.g. patient has no PKV, SplitType is Beihilfe-only).
+  Use 'classic' when the full invoice amount is billed to the employee (no percentage reduction applied by the provider).
 - For date_of_service: use the date of treatment, not the invoice date. If multiple service dates, use the earliest.
 - invoice_type_hint: use 'stationaer' for hospital stays (Krankenhaus, Klinik), 'dental_basic' for dental (Zahnarzt) unless clearly prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy (Apotheke)
 - Return null for any field you cannot determine with confidence
