@@ -5,7 +5,7 @@ Column mapping (as specified):
   A (0)  date of service
   B (1)  provider
   C (2)  treatment  (used for invoice_type inference only)
-  D (3)  person first name  ("beide" → split Maja + Leo 50/50; "?" → skip)
+  D (3)  person first name  ("beide" → split between the two children 50/50; "?" → skip)
   E (4)  total amount
   F (5)  due date (may be empty)
   G (6)  payment status   bezahlt=paid | offen=open | else=open
@@ -159,6 +159,7 @@ def infer_invoice_type(treatment: str) -> InvoiceType:
 def row_to_invoices(
     raw: list[str],
     person_map: dict[str, str],     # first_name.lower() → person_id
+    children_ids: list[str] | None = None,  # person_ids for "beide" split
 ) -> tuple[list[Invoice], Optional[str]]:
     """
     Parse one data row.
@@ -267,18 +268,17 @@ def row_to_invoices(
 
     # --- Resolve person ---
     if person_raw.lower() == "beide":
-        maja_id = person_map.get("maja")
-        leo_id  = person_map.get("leo")
-        if not maja_id or not leo_id:
-            return [], "beide: Maja or Leo not found in persons sheet"
+        ids = children_ids or []
+        if len(ids) < 2:
+            return [], "beide: fewer than two children found in persons sheet"
         half      = (total_amount  / 2).quantize(Decimal("0.01"))
         p_exp_h   = (pkv_expected  / 2).quantize(Decimal("0.01"))
         p_reimb_h = (pkv_reimbursed / 2).quantize(Decimal("0.01"))
         b_exp_h   = (bh_expected   / 2).quantize(Decimal("0.01"))
         b_reimb_h = (bh_reimbursed / 2).quantize(Decimal("0.01"))
         return [
-            make(maja_id, half, p_exp_h, p_reimb_h, pkv_share_pct, b_exp_h, b_reimb_h, bh_share_pct),
-            make(leo_id,  half, p_exp_h, p_reimb_h, pkv_share_pct, b_exp_h, b_reimb_h, bh_share_pct),
+            make(pid, half, p_exp_h, p_reimb_h, pkv_share_pct, b_exp_h, b_reimb_h, bh_share_pct)
+            for pid in ids[:2]
         ], None
 
     person_id = person_map.get(person_raw.lower())
@@ -314,6 +314,10 @@ def main(
     person_map: dict[str, str] = {p.first_name.lower(): p.person_id for p in persons}
     console.print(f"  Known persons: {', '.join(p.first_name for p in persons)}")
 
+    # "beide" rows split 50/50 across children (role=CHILD), in sheet order
+    from passierschein.domain.enums import PatientRole
+    children_ids = [p.person_id for p in persons if str(p.role) == PatientRole.CHILD.value]
+
     # Parse CSV — skip the two header rows
     with open(csv_path, newline="", encoding="utf-8-sig") as fh:
         all_rows = list(csv.reader(fh))
@@ -331,7 +335,7 @@ def main(
         if not raw[C_DATE_SVC].strip() or not raw[C_AMOUNT].strip():
             continue
 
-        result, reason = row_to_invoices(raw, person_map)
+        result, reason = row_to_invoices(raw, person_map, children_ids)
         if reason:
             skipped.append((i, reason))
         else:

@@ -57,8 +57,8 @@ If only payment terms like '30 Tage' are stated, compute due_date = date_of_invo
 - patient_name: German invoices have three distinct names — (1) Rechnungsempfänger (billing \
 address, often a parent/guardian), (2) Versicherter (insurance holder), (3) actual patient \
 labelled 'Name:', 'Patient:', or 'Behandelter:' near the service/diagnosis section. \
-Use (3) when present; fall back to (2) then (1). Example: billing address 'Schäper, Ilka' \
-but 'Name: Schäper, Maja' with a birth date in the body → patient is Maja.
+Use (3) when present; fall back to (2) then (1). Example: billing address 'Müller, Anna' \
+but 'Name: Müller, Tim' with a birth date in the body → patient is Tim.
 - split_type_hint: use 'direct_billing' when ANY signal is present — \
 (a) labels 'Beihilfeanteil', 'Anteil für Beihilfe', 'gemäß Beihilfesatz'; \
 (b) line items show percentage factor e.g. '80 bis 1.847,56' (Beihilfe % applied per line, PKV billed separately); \
