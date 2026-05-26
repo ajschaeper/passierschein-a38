@@ -101,9 +101,28 @@ def list_persons() -> None:
 
 
 @app.command("add-invoice")
-def add_invoice(dry_run: bool = typer.Option(False, "--dry-run")) -> None:
-    """WF-1: Capture a new invoice (manual entry)."""
-    wf1_intake.run(dry_run=dry_run)
+def add_invoice(
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    file: Optional[str] = typer.Option(None, "--file", "-f", help="Invoice file to OCR before entry"),
+) -> None:
+    """WF-1: Capture a new invoice (manual or OCR-assisted)."""
+    ocr_hints: dict = {}
+    if file:
+        from rich.console import Console
+        from passierschein.adapters.claude_ocr import extract_invoice_data
+        _con = Console()
+        _con.print(f"[dim]Running OCR on {file}…[/dim]")
+        try:
+            ocr_hints = extract_invoice_data(file)
+            _con.print(
+                f"[dim]OCR extracted: "
+                f"provider=[bold]{ocr_hints.get('provider', '?')}[/bold]  "
+                f"amount=€{ocr_hints.get('total_amount', '?')}  "
+                f"date={ocr_hints.get('date_of_service', '?')}[/dim]"
+            )
+        except Exception as exc:
+            _con.print(f"[yellow]OCR failed ({exc}) — continuing with manual entry.[/yellow]")
+    wf1_intake.run(dry_run=dry_run, ocr_hints=ocr_hints)
 
 
 @app.command("set-paid-out")
@@ -161,6 +180,60 @@ def dashboard() -> None:
 def alerts() -> None:
     """WF-6: Show overdue claims and alerts."""
     wf6_alerts.run()
+
+
+@app.command("ocr")
+def ocr_file(
+    file: str = typer.Argument(..., help="PDF or image file to extract"),
+    raw: bool = typer.Option(False, "--raw", help="Print raw JSON instead of formatted table"),
+) -> None:
+    """Run Claude OCR on an invoice file and display extracted fields."""
+    from rich.console import Console
+    from rich.table import Table
+    from passierschein.adapters.claude_ocr import extract_invoice_data
+    console = Console()
+
+    console.print(f"[dim]Extracting from [bold]{file}[/bold]…[/dim]")
+    try:
+        data = extract_invoice_data(file)
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1)
+    except Exception as exc:
+        console.print(f"[red]OCR failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if raw:
+        import json
+        console.print_json(json.dumps(data, indent=2, default=str))
+        return
+
+    t = Table(title=f"OCR — {Path(file).name}", show_lines=True)
+    t.add_column("Field", style="bold")
+    t.add_column("Extracted value")
+
+    field_labels = [
+        ("provider",         "Provider"),
+        ("patient_name",     "Patient"),
+        ("date_of_service",  "Date of service"),
+        ("date_of_invoice",  "Date of invoice"),
+        ("total_amount",     "Total amount"),
+        ("split_type_hint",  "Split type hint"),
+        ("invoice_type_hint","Invoice type hint"),
+        ("invoice_number",   "Invoice number"),
+        ("notes",            "Notes"),
+    ]
+    for key, label in field_labels:
+        val = data.get(key)
+        if val is not None and val != "":
+            t.add_row(label, str(val))
+
+    line_items = data.get("line_items") or []
+    if line_items:
+        for i, li in enumerate(line_items, 1):
+            t.add_row(f"  Line item {i}", f"{li.get('description', '')}  €{li.get('amount', '')}")
+
+    console.print(t)
 
 
 if __name__ == "__main__":
