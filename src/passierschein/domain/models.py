@@ -31,6 +31,37 @@ def cents(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def _coerce_money(v: object) -> Decimal:
+    """Normalise any incoming monetary value to a canonical Decimal with 2 dp.
+
+    Handles all paths into the model: raw Decimal/int/float from Python, float
+    from Sheets (with IEEE 754 precision artifacts), string with or without
+    currency symbol ('532,69', '532.69 €', '1.234,56'). Always returns the
+    same canonical form so equality comparisons in dedup are reliable.
+    """
+    if v is None or v == "":
+        return Decimal("0.00")
+    if isinstance(v, str):
+        s = v.strip().replace("€", "").replace("EUR", "").replace("\xa0", "").replace(" ", "")
+        # German format: '1.234,56' → '1234.56'
+        if "," in s and s.count(",") == 1:
+            s = s.replace(".", "").replace(",", ".")
+        if not s:
+            return Decimal("0.00")
+        return cents(Decimal(s))
+    # float / int / Decimal — convert via str() to avoid float→Decimal artifacts
+    return cents(Decimal(str(v)))
+
+
+def _coerce_pct(v: object) -> Decimal:
+    """Normalise a percentage value (0.0–1.0) via string to avoid float artifacts.
+
+    Not quantized to 2dp because the matrix may carry finer-grained values."""
+    if v is None or v == "":
+        return Decimal("0")
+    return Decimal(str(v))
+
+
 # ---------------------------------------------------------------------------
 # Document  (captured file, classified and linked to Invoice or SettlementReport)
 # ---------------------------------------------------------------------------
@@ -121,14 +152,18 @@ class Invoice(BaseModel):
         return self
 
     @field_validator(
-        "total_amount", "employee_net_expected", "pkv_share_pct", "pkv_expected",
-        "pkv_reimbursed", "beihilfe_share_pct", "beihilfe_expected",
-        "beihilfe_reimbursed", "total_reimbursed", "net_cost",
+        "total_amount", "employee_net_expected", "pkv_expected", "pkv_reimbursed",
+        "beihilfe_expected", "beihilfe_reimbursed", "total_reimbursed", "net_cost",
         mode="before",
     )
     @classmethod
-    def coerce_decimal(cls, v: object) -> Decimal:
-        return Decimal(str(v)) if v is not None else Decimal("0")
+    def _money(cls, v: object) -> Decimal:
+        return _coerce_money(v)
+
+    @field_validator("pkv_share_pct", "beihilfe_share_pct", mode="before")
+    @classmethod
+    def _pct(cls, v: object) -> Decimal:
+        return _coerce_pct(v)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +182,11 @@ class SettlementReport(BaseModel):
 
     class Config:
         use_enum_values = True
+
+    @field_validator("total_reimbursed", mode="before")
+    @classmethod
+    def _money(cls, v: object) -> Decimal:
+        return _coerce_money(v)
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +209,15 @@ class SettlementLineItem(BaseModel):
 
     class Config:
         use_enum_values = True
+
+    @field_validator(
+        "billed_amount", "eligible_amount", "reimbursed_amount",
+        "not_covered_amount", "rate_cap_reduction", "deductible_applied",
+        mode="before",
+    )
+    @classmethod
+    def _money(cls, v: object) -> Decimal:
+        return _coerce_money(v)
 
     @model_validator(mode="after")
     def check_invariant(self) -> SettlementLineItem:
@@ -205,6 +254,11 @@ class Payment(BaseModel):
     class Config:
         use_enum_values = True
 
+    @field_validator("amount", "discrepancy", mode="before")
+    @classmethod
+    def _money(cls, v: object) -> Decimal:
+        return _coerce_money(v)
+
 
 # ---------------------------------------------------------------------------
 # Beihilfe Annual Deductible  (Kostendämpfungspauschale)
@@ -214,6 +268,11 @@ class BeihilfeDeductible(BaseModel):
     year:               int
     configured_amount:  Decimal
     consumed_ytd:       Decimal  = Decimal("0.00")
+
+    @field_validator("configured_amount", "consumed_ytd", mode="before")
+    @classmethod
+    def _money(cls, v: object) -> Decimal:
+        return _coerce_money(v)
 
     @property
     def remaining(self) -> Decimal:
