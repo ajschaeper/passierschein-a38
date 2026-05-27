@@ -132,44 +132,35 @@ def _parse_ocr_date(raw: Optional[str]) -> Optional[date]:
         return None
 
 
-def _match_person(
-    patient_name: Optional[str],
-    patient_birth_date: Optional[date],
+def _try_match_single(
+    name: Optional[str],
+    birth_date: Optional[date],
     persons: list,
 ) -> Optional[int]:
-    """Return 0-based index of the best-matching person, or None if ambiguous.
+    """Match one (name, birth_date) pair against the household. Returns the
+    person index or None if ambiguous / no match.
 
     Priority:
-      1. birth_date match (unique per person, except twins) — immune to
-         parent/child name collisions and to OCR returning the billing
-         recipient instead of the patient. If multiple persons share the
-         birth_date (twins), use first_name as the tie-breaker. If the
-         first_name doesn't disambiguate, return None — refuse to guess.
-      2. first_name-only match (no birth date available). Only commits if
-         the first name uniquely identifies one person; family name alone
-         is too ambiguous in a household.
-
-    Returning None is correct when uncertain — the user will pick manually,
-    rather than silently linking the invoice to the wrong patient.
+      1. birth_date match (unique per person, except twins). Twins are
+         disambiguated by first_name; if that doesn't help, return None.
+      2. first_name uniqueness in the household. Family name alone is
+         too ambiguous to commit to.
     """
-    name_lower = patient_name.lower() if patient_name else ""
+    name_lower = name.lower() if name else ""
 
-    # Primary: birth date
-    if patient_birth_date is not None:
-        dob_hits = [i for i, p in enumerate(persons) if p.birth_date == patient_birth_date]
+    if birth_date is not None:
+        dob_hits = [i for i, p in enumerate(persons) if p.birth_date == birth_date]
         if len(dob_hits) == 1:
             return dob_hits[0]
         if len(dob_hits) > 1:
-            # Twins (or other DOB collisions) — disambiguate by first name.
             name_hits = [
                 i for i in dob_hits
                 if name_lower and persons[i].first_name.lower() in name_lower
             ]
             if len(name_hits) == 1:
                 return name_hits[0]
-            return None  # genuinely ambiguous — force user to pick
+            return None
 
-    # Fallback: first-name uniqueness in the household
     if name_lower:
         first_hits = [
             i for i, p in enumerate(persons)
@@ -177,6 +168,38 @@ def _match_person(
         ]
         if len(first_hits) == 1:
             return first_hits[0]
+
+    return None
+
+
+def _match_person(
+    patient_name: Optional[str],
+    patient_birth_date: Optional[date],
+    persons: list,
+    self_pay_fallback_name: Optional[str] = None,
+    self_pay_fallback_birth_date: Optional[date] = None,
+) -> Optional[int]:
+    """Identify the patient against the household.
+
+    Priority:
+      1. Match using (patient_name, patient_birth_date) when present —
+         this is the labelled patient on the invoice.
+      2. If patient info is absent AND OCR signalled is_self_pay, fall back
+         to the policy holder / recipient via the *_fallback_* args. Self-pay
+         invoices have no separate patient block: the recipient is the patient.
+
+    The fallback is ONLY used when patient info is empty (i.e. OCR explicitly
+    found no labelled patient). It is never used when patient_name is present
+    but happens not to match — that case means OCR may have extracted the
+    wrong person, so we prompt rather than silently substitute.
+    """
+    if patient_name or patient_birth_date:
+        return _try_match_single(patient_name, patient_birth_date, persons)
+
+    if self_pay_fallback_name or self_pay_fallback_birth_date:
+        return _try_match_single(
+            self_pay_fallback_name, self_pay_fallback_birth_date, persons,
+        )
 
     return None
 
@@ -227,18 +250,40 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     if not persons:
         raise ValueError("No persons configured. Run setup first.")
 
+    # Primary: match against the labelled patient if OCR found one.
+    # Fallback: when no patient label was found, try the policy holder —
+    # covers self-pay invoices (single adult, no patient block).
+    patient_dob = _parse_ocr_date(ocr.get("patient_birth_date"))
+    has_patient = bool(ocr.get("patient_name") or patient_dob)
+
     ocr_person_idx = _match_person(
         ocr.get("patient_name"),
-        _parse_ocr_date(ocr.get("patient_birth_date")),
+        patient_dob,
         persons,
+        self_pay_fallback_name=ocr.get("policy_holder_name"),
+        self_pay_fallback_birth_date=_parse_ocr_date(ocr.get("policy_holder_birth_date")),
     )
 
-    # Auto-select when OCR patient identification confidence is high and a match was found.
-    # Prefer birth_date confidence; fall back to patient_name confidence.
-    _ocr_person_auto = (
+    # Auto-accept gate:
+    #  (a) explicit patient labelled, OCR confident → trust it
+    #  (b) self-pay: OCR *confidently* returned null patient (no label found)
+    #      AND found the policy holder with high confidence → trust the fallback
+    # Anything else (medium/low patient confidence, ambiguous fallback) goes
+    # through the menu so the user confirms — protects against silent
+    # mislinking on child invoices where OCR misidentifies the patient.
+    _patient_high = has_patient and (
         _auto(ocr, "patient_birth_date", ocr.get("patient_birth_date"))
         or _auto(ocr, "patient_name", ocr.get("patient_name"))
     )
+    _self_pay_high = (
+        not has_patient                              # OCR returned null patient
+        and _conf(ocr, "patient_name") == "high"     # …confidently (no entry in _confidence map)
+        and (
+            _auto(ocr, "policy_holder_birth_date", ocr.get("policy_holder_birth_date"))
+            or _auto(ocr, "policy_holder_name", ocr.get("policy_holder_name"))
+        )
+    )
+    _ocr_person_auto = _patient_high or _self_pay_high
     if ocr_person_idx is not None and _ocr_person_auto:
         person = persons[ocr_person_idx]
         console.print(
