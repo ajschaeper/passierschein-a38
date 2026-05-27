@@ -156,6 +156,16 @@ def match_payments() -> None:
     wf_match_payment.run()
 
 
+@app.command("format-sheet")
+def format_sheet() -> None:
+    """Apply visual formatting to all sheet tabs (colours, widths, conditional formatting)."""
+    _scripts = str(Path(__file__).resolve().parent)
+    if _scripts not in sys.path:
+        sys.path.insert(0, _scripts)
+    from format_sheets import run as _run  # type: ignore[import]
+    _run()
+
+
 @app.command("migrate-sheet")
 def migrate_sheet() -> None:
     """Sync all sheet tab header rows to match the current code schema.
