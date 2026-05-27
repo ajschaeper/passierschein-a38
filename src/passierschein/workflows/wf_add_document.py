@@ -94,6 +94,7 @@ def run(
     repo: SheetsRepository | None = None,
     local_file: str | None = None,
     dry_run: bool = False,
+    _session_invoices: list | None = None,
 ) -> Document:
     """
     Full add-document flow. Call from the CLI add-document command.
@@ -135,7 +136,10 @@ def run(
             _archive(document.file_path, f"settlement_{report.type}", ocr_hints, report.received_at)
     else:
         from . import wf1_intake
-        invoice = wf1_intake.run(repo=repo, dry_run=dry_run, document_id=document.id, ocr_hints=ocr_hints)
+        invoice = wf1_intake.run(
+            repo=repo, dry_run=dry_run, document_id=document.id,
+            ocr_hints=ocr_hints, _session_invoices=_session_invoices,
+        )
         if not dry_run and invoice is not None:
             document.linked_entity_id = invoice.id
             document.status = DocumentStatus.PROCESSED
@@ -160,10 +164,11 @@ def run_batch(repo: SheetsRepository | None = None) -> list[Document]:
 
     console.rule(f"[bold blue]Batch import — {len(drive_files)} file(s) in Inbox")
     results: list[Document] = []
+    session_invoices: list = []  # invoices created this session — feeds dedup across files
     for i, f in enumerate(drive_files, 1):
         console.rule(f"[dim]{i}/{len(drive_files)}: {f['name']}")
         try:
-            doc = run(repo=repo, local_file=f["id"])
+            doc = run(repo=repo, local_file=f["id"], _session_invoices=session_invoices)
             results.append(doc)
         except Exception as exc:
             console.print(f"[red]Failed: {exc}[/red]")

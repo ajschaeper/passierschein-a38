@@ -45,6 +45,7 @@ def run(
     dry_run: bool = False,
     document_id: str | None = None,
     ocr_hints: dict | None = None,
+    _session_invoices: list[Invoice] | None = None,
 ) -> Optional[Invoice]:
     repo = repo or SheetsRepository()
     two_plus = repo.two_plus_children()
@@ -55,40 +56,8 @@ def run(
     if document_id:
         fields["document_id"] = document_id
 
-    # Duplicate check
-    dupes = _find_duplicates(
-        repo.invoices.get_all(),
-        fields["provider"],
-        fields["date_of_service"],
-        fields["total_amount"],
-        fields["person_id"],
-    )
-    if dupes:
-        console.print(
-            f"\n[bold yellow]⚠  Possible duplicate — "
-            f"{len(dupes)} existing invoice(s) match provider, date, and amount:[/bold yellow]"
-        )
-        dt = Table(show_lines=True)
-        dt.add_column("ID")
-        dt.add_column("Provider")
-        dt.add_column("Date of service")
-        dt.add_column("Amount", justify="right")
-        dt.add_column("Person")
-        dt.add_column("Payment")
-        for inv in dupes:
-            dt.add_row(
-                inv.id[:8] + "…",
-                inv.provider,
-                str(inv.date_of_service),
-                f"€ {inv.total_amount:,.2f}",
-                persons_map.get(inv.person_id, inv.person_id[:8] + "…"),
-                str(inv.payment_status),
-            )
-        console.print(dt)
-        if not Confirm.ask("Save anyway?", default=False):
-            console.print("[yellow]Aborted.[/yellow]")
-            return None
-
+    # Build the invoice first so the dedup and summary both use the same
+    # validated values — not the raw OCR/form output which can vary between runs.
     invoice = Invoice(**fields)
 
     # Confirmation summary
@@ -110,10 +79,52 @@ def run(
         console.print("[yellow]Dry run — nothing written.[/yellow]")
         return invoice
 
-    if Confirm.ask("Save to Sheets?", default=True):
-        repo.invoices.append(invoice)
-        console.print(f"[bold green]✓ Invoice {invoice.id} saved.[/bold green]")
-        return invoice
+    # Duplicate check — runs after the summary so the user has reviewed the
+    # confirmed values, and uses invoice.* (workflow output) not raw OCR fields.
+    # Combines sheet data with any invoices saved earlier in this session
+    # (Sheets API writes may not propagate immediately within the same process).
+    dupes = _find_duplicates(
+        repo.invoices.get_all() + (_session_invoices or []),
+        invoice.provider,
+        invoice.date_of_service,
+        invoice.total_amount,
+        invoice.person_id,
+    )
 
-    console.print("[yellow]Aborted.[/yellow]")
-    return None
+    if dupes:
+        console.print(
+            f"\n[bold yellow]⚠  Possible duplicate — "
+            f"{len(dupes)} existing invoice(s) match provider, date, amount and patient:[/bold yellow]"
+        )
+        dt = Table(show_lines=True)
+        dt.add_column("ID")
+        dt.add_column("Provider")
+        dt.add_column("Date of service")
+        dt.add_column("Amount", justify="right")
+        dt.add_column("Person")
+        dt.add_column("Payment")
+        for inv in dupes:
+            dt.add_row(
+                inv.id[:8] + "…",
+                inv.provider,
+                str(inv.date_of_service),
+                f"€ {inv.total_amount:,.2f}",
+                persons_map.get(inv.person_id, inv.person_id[:8] + "…"),
+                str(inv.payment_status),
+            )
+        console.print(dt)
+        save_prompt   = "Duplicate — save anyway?"
+        save_default  = False
+    else:
+        save_prompt   = "Save to Sheets?"
+        save_default  = True
+
+    if not Confirm.ask(save_prompt, default=save_default):
+        console.print("[yellow]Aborted.[/yellow]")
+        return None
+
+    repo.invoices.append(invoice)
+    if _session_invoices is not None:
+        _session_invoices.append(invoice)
+    console.print(f"[bold green]✓ Invoice {invoice.id} saved.[/bold green]")
+    return invoice
