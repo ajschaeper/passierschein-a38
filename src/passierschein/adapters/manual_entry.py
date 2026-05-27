@@ -132,13 +132,58 @@ def _parse_ocr_date(raw: Optional[str]) -> Optional[date]:
         return None
 
 
-def _match_person_by_name(patient_name: str, persons: list) -> Optional[int]:
-    """Return 0-based index of the best-matching person, or None."""
-    name_lower = patient_name.lower()
-    for i, p in enumerate(persons):
-        if p.first_name.lower() in name_lower or p.family_name.lower() in name_lower:
-            return i
+def _match_person(
+    patient_name: Optional[str],
+    patient_birth_date: Optional[date],
+    persons: list,
+) -> Optional[int]:
+    """Return 0-based index of the best-matching person, or None if ambiguous.
+
+    Priority:
+      1. birth_date match (unique per person, except twins) — immune to
+         parent/child name collisions and to OCR returning the billing
+         recipient instead of the patient. If multiple persons share the
+         birth_date (twins), use first_name as the tie-breaker. If the
+         first_name doesn't disambiguate, return None — refuse to guess.
+      2. first_name-only match (no birth date available). Only commits if
+         the first name uniquely identifies one person; family name alone
+         is too ambiguous in a household.
+
+    Returning None is correct when uncertain — the user will pick manually,
+    rather than silently linking the invoice to the wrong patient.
+    """
+    name_lower = patient_name.lower() if patient_name else ""
+
+    # Primary: birth date
+    if patient_birth_date is not None:
+        dob_hits = [i for i, p in enumerate(persons) if p.birth_date == patient_birth_date]
+        if len(dob_hits) == 1:
+            return dob_hits[0]
+        if len(dob_hits) > 1:
+            # Twins (or other DOB collisions) — disambiguate by first name.
+            name_hits = [
+                i for i in dob_hits
+                if name_lower and persons[i].first_name.lower() in name_lower
+            ]
+            if len(name_hits) == 1:
+                return name_hits[0]
+            return None  # genuinely ambiguous — force user to pick
+
+    # Fallback: first-name uniqueness in the household
+    if name_lower:
+        first_hits = [
+            i for i, p in enumerate(persons)
+            if p.first_name.lower() in name_lower
+        ]
+        if len(first_hits) == 1:
+            return first_hits[0]
+
     return None
+
+
+# Legacy name kept for compatibility with any callers — delegates to the new matcher.
+def _match_person_by_name(patient_name: str, persons: list) -> Optional[int]:
+    return _match_person(patient_name, None, persons)
 
 
 def _conf(ocr: dict, field: str) -> str:
@@ -182,12 +227,19 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     if not persons:
         raise ValueError("No persons configured. Run setup first.")
 
-    ocr_person_idx = None
-    if ocr.get("patient_name"):
-        ocr_person_idx = _match_person_by_name(ocr["patient_name"], persons)
+    ocr_person_idx = _match_person(
+        ocr.get("patient_name"),
+        _parse_ocr_date(ocr.get("patient_birth_date")),
+        persons,
+    )
 
-    # Auto-select when OCR patient_name confidence is high and a match was found
-    if ocr_person_idx is not None and _auto(ocr, "patient_name", ocr.get("patient_name")):
+    # Auto-select when OCR patient identification confidence is high and a match was found.
+    # Prefer birth_date confidence; fall back to patient_name confidence.
+    _ocr_person_auto = (
+        _auto(ocr, "patient_birth_date", ocr.get("patient_birth_date"))
+        or _auto(ocr, "patient_name", ocr.get("patient_name"))
+    )
+    if ocr_person_idx is not None and _ocr_person_auto:
         person = persons[ocr_person_idx]
         console.print(
             f"  Person [dim](OCR ✓)[/dim]: [bold]{person.first_name} {person.family_name}[/bold]"

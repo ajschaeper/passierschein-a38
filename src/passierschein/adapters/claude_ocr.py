@@ -43,6 +43,7 @@ Return ONLY a JSON object — no prose, no markdown, no explanation:
   "due_date": "YYYY-MM-DD or null",
   "provider": "name of the doctor, hospital, or pharmacy",
   "patient_name": "name of the PATIENT who received treatment — see rules below",
+  "patient_birth_date": "YYYY-MM-DD — patient's date of birth from the invoice ('Geb.', 'geboren am', 'GebDat'), or null if not present",
   "total_amount": "decimal string, e.g. '142.50'",
   "invoice_type_hint": "ambulant | stationaer | dental_basic | zahnersatz | kfo | psychotherapy | hilfsmittel | arzneimittel | heilmittel | other",
   "split_type_hint": "classic | beihilfe_only",
@@ -57,9 +58,17 @@ If only payment terms like '30 Tage' are stated, compute due_date = date_of_invo
 A date computed from explicit payment terms is deterministic — treat it as high confidence.
 - patient_name: German invoices have three distinct names — (1) Rechnungsempfänger (billing \
 address, often a parent/guardian), (2) Versicherter (insurance holder), (3) actual patient \
-labelled 'Name:', 'Patient:', or 'Behandelter:' near the service/diagnosis section. \
-Use (3) when present; fall back to (2) then (1). Example: billing address 'Müller, Anna' \
-but 'Name: Müller, Tim' with a birth date in the body → patient is Tim.
+labelled 'Name:', 'Patient:', 'Behandelter:', or 'Pat.:' near the service/diagnosis section, \
+usually accompanied by a birth date ('Geb.', 'geb. am', 'GebDat'). \
+ONLY return the actual patient — name (3). If the patient block is not clearly labelled \
+or you are not confident which of multiple names is the patient, return null. \
+Do NOT fall back to the billing recipient (1) or policy holder (2) — a wrong patient \
+silently corrupts data. Returning null is correct; the user will pick the patient manually. \
+Example: billing address 'Müller, Anna' but 'Pat.: Müller, Tim, geb. 15.03.2018' in the \
+service block → patient is Tim; patient_birth_date is 2018-03-15.
+- patient_birth_date: extract from the SAME block as patient_name (the patient's birth \
+date, NOT the policy holder's or recipient's). Return null if you returned null for \
+patient_name, or if no birth date is visible next to the patient label.
 - split_type_hint: use 'beihilfe_only' when ANY of these signals is present — \
 (a) labels 'Beihilfeanteil', 'Anteil für Beihilfe', 'gemäß Beihilfesatz' (provider billed PKV directly; this is the Beihilfe-portion invoice); \
 (b) line items show a Beihilfe percentage factor e.g. '80 bis 1.847,56'; \
