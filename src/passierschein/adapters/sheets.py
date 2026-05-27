@@ -141,20 +141,26 @@ def _fix_date_serials(record: dict) -> dict:
     return result
 
 
+import re
+
+# Strict enum-repr pattern: 'ClassName.UPPER_VALUE' with no spaces, no
+# additional dots, no lowercase in the value half. Avoids false matches on
+# real text like 'Dr. med. Thomas Kaleta, ...' which is NOT an enum repr.
+_ENUM_REPR_RE = re.compile(r"^[A-Z][A-Za-z0-9]+\.[A-Z][A-Z0-9_]*$")
+
+
 def _fix_enum_reprs(record: dict) -> dict:
     """
-    Normalise enum values that were incorrectly written as 'ClassName.VALUE'
-    (e.g. 'PaymentStatus.OPEN') back to the raw enum value string (e.g. 'open').
-    This handles rows written before the _to_str() Enum fix was applied.
+    Normalise legacy enum values written as 'ClassName.VALUE'
+    (e.g. 'PaymentStatus.OPEN') back to the raw enum value string ('open').
+    Conservative: only matches strings that look exactly like an enum repr,
+    never touches real text fields that happen to contain a dot.
     """
     result = {}
     for k, v in record.items():
-        if isinstance(v, str) and "." in v:
-            parts = v.split(".", 1)
-            # Heuristic: class name starts with an uppercase letter
-            if parts[0] and parts[0][0].isupper():
-                result[k] = parts[1].lower()
-                continue
+        if isinstance(v, str) and _ENUM_REPR_RE.match(v):
+            result[k] = v.split(".", 1)[1].lower()
+            continue
         result[k] = v
     return result
 
