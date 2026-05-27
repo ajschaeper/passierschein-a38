@@ -27,14 +27,16 @@ def _find_duplicates(
     provider: str,
     date_of_service: date,
     total_amount: Decimal,
+    person_id: str,
 ) -> list[Invoice]:
-    """Return invoices that match on provider (case-insensitive), date, and amount."""
+    """Return invoices that match on provider (case-insensitive), date, amount, and patient."""
     needle = provider.lower().strip()
     return [
         inv for inv in existing
         if (inv.provider.lower().strip() == needle
             and inv.date_of_service == date_of_service
-            and inv.total_amount == total_amount)
+            and inv.total_amount == total_amount
+            and inv.person_id == person_id)
     ]
 
 
@@ -59,6 +61,7 @@ def run(
         fields["provider"],
         fields["date_of_service"],
         fields["total_amount"],
+        fields["person_id"],
     )
     if dupes:
         console.print(
