@@ -45,7 +45,7 @@ Return ONLY a JSON object — no prose, no markdown, no explanation:
   "patient_name": "name of the PATIENT who received treatment — see rules below",
   "total_amount": "decimal string, e.g. '142.50'",
   "invoice_type_hint": "ambulant | stationaer | dental_basic | zahnersatz | kfo | psychotherapy | hilfsmittel | arzneimittel | heilmittel | other",
-  "split_type_hint": "classic | beihilfe_only | direct_billing",
+  "split_type_hint": "classic | beihilfe_only",
   "invoice_number": "Rechnungsnummer or null",
   "notes": "brief note (GOÄ codes, partial invoice, etc.) or null"
 }
@@ -60,11 +60,12 @@ address, often a parent/guardian), (2) Versicherter (insurance holder), (3) actu
 labelled 'Name:', 'Patient:', or 'Behandelter:' near the service/diagnosis section. \
 Use (3) when present; fall back to (2) then (1). Example: billing address 'Müller, Anna' \
 but 'Name: Müller, Tim' with a birth date in the body → patient is Tim.
-- split_type_hint: use 'direct_billing' when ANY signal is present — \
-(a) labels 'Beihilfeanteil', 'Anteil für Beihilfe', 'gemäß Beihilfesatz'; \
-(b) line items show percentage factor e.g. '80 bis 1.847,56' (Beihilfe % applied per line, PKV billed separately); \
-(c) 'Faktor: 0.8' or '80%' column across most items. \
-Use 'beihilfe_only' when no PKV at all. Use 'classic' for full invoice billed to employee.
+- split_type_hint: use 'beihilfe_only' when ANY of these signals is present — \
+(a) labels 'Beihilfeanteil', 'Anteil für Beihilfe', 'gemäß Beihilfesatz' (provider billed PKV directly; this is the Beihilfe-portion invoice); \
+(b) line items show a Beihilfe percentage factor e.g. '80 bis 1.847,56'; \
+(c) 'Faktor: 0.8' or '80%' column across most items; \
+(d) service is from a Heilpraktiker or other provider not covered by PKV. \
+Use 'classic' for any other full invoice billed entirely to the employee.
 - date_of_service: date of treatment (not invoice date); if multiple dates, use earliest.
 - invoice_type_hint: 'stationaer' for hospital stays, 'dental_basic' for Zahnarzt unless \
 prosthetics/implants (zahnersatz), 'arzneimittel' for pharmacy.

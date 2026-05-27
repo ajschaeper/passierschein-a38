@@ -13,20 +13,19 @@ Every medical invoice triggers two parallel reimbursement processes:
 1. **PKV (Private Krankenversicherung)** — the employee's private health insurer, covering a fixed percentage of eligible costs
 2. **Beihilfe** — the employer (federal/state government), covering the remaining percentage directly
 
-The Beihilfe share is determined by a `(person role × split type)` matrix. There are three split types:
+The Beihilfe share is determined by a `(person role × split type)` matrix. There are two split types:
 
 - **Classic** — the standard role-based split; employee paid the full invoice upfront and claims both PKV and Beihilfe shares
-- **Beihilfe-only** — 100% Beihilfe regardless of role; PKV not applicable (e.g. Heilpraktiker not covered by PKV)
-- **Direct billing** — the provider has already billed PKV directly; the employee receives only the Beihilfe portion as an invoice and claims 100% of it from Beihilfe; PKV not applicable
+- **Beihilfe-only** — 100% Beihilfe regardless of role; PKV not applicable. Covers two scenarios: (a) service not covered by PKV at all (e.g. Heilpraktiker); (b) provider already billed PKV directly and issued only the Beihilfe portion to the employee — the outcome is identical in both cases
 
-| Role | Classic | Direct billing | Beihilfe-only |
-|---|---|---|---|
-| Employee | 50% Beihilfe / 50% PKV | 100% Beihilfe | 100% Beihilfe |
-| Employee (2+ children) | 70% Beihilfe / 30% PKV | 100% Beihilfe | 100% Beihilfe |
-| Spouse | 70% Beihilfe / 30% PKV | 100% Beihilfe | 100% Beihilfe |
-| Child | 80% Beihilfe / 20% PKV | 100% Beihilfe | 100% Beihilfe |
+| Role | Classic | Beihilfe-only |
+|---|---|---|
+| Employee | 50% Beihilfe / 50% PKV | 100% Beihilfe |
+| Employee (2+ children) | 70% Beihilfe / 30% PKV | 100% Beihilfe |
+| Spouse | 70% Beihilfe / 30% PKV | 100% Beihilfe |
+| Child | 80% Beihilfe / 20% PKV | 100% Beihilfe |
 
-The `split_type` is set at intake and drives the split matrix lookup. For `beihilfe_only` and `direct_billing`, `pkv_claim_status` is automatically set to `not_applicable`.
+The `split_type` is set at intake and drives the split matrix lookup. For `beihilfe_only`, `pkv_claim_status` is automatically set to `not_applicable`.
 
 This means every invoice must be analysed, split, and submitted to two different institutions with different forms, deadlines, and processes.
 
@@ -116,7 +115,7 @@ The invoice is the **leading entity** of the data model. All claim, settlement, 
 | `id` | Unique identifier |
 | `person_id` | FK → Person |
 | `invoice_type` | Optional categorisation: `ambulant` / `stationaer` / `dental_basic` / `zahnersatz` / `kfo` / `psychotherapy` / `hilfsmittel` / `arzneimittel` / `heilmittel` / `other` (default) |
-| `split_type` | `classic` / `beihilfe_only` / `direct_billing` — drives the split matrix lookup |
+| `split_type` | `classic` / `beihilfe_only` — drives the split matrix lookup |
 | `provider` | Doctor, hospital, pharmacy, etc. |
 | `date_of_service` | When the medical service was rendered |
 | `date_received` | When the invoice arrived |
@@ -265,7 +264,7 @@ Captures a source file (PDF or image), extracts structured data via Claude OCR, 
 ### add-invoice (WF-1)
 1. User selects person, split type, provider, dates, and total amount
 2. System resolves the split via `split_matrix[person.role][split_type]`
-3. For `direct_billing`: `employee_net_expected` = Beihilfe portion only (computed automatically)
+3. For `beihilfe_only`: `employee_net_expected` = full invoice amount (already the Beihilfe portion); `pkv_claim_status` set to `not_applicable`
 4. User confirms; invoice saved with `payment_status = open`, claims `open`
 
 ### set-paid-out (WF-2)
