@@ -15,16 +15,16 @@ Every medical invoice triggers two parallel reimbursement processes:
 
 The Beihilfe share is determined by a `(person role × split type)` matrix. There are three split types:
 
-- **Classic** — the standard role-based split, employee paid the full invoice upfront
-- **Beihilfe-only** — 100% Beihilfe regardless of role, PKV not applicable
-- **Direct billing** — the same role-based percentages as classic, but the provider invoiced PKV directly; the employee only pays (and claims) the Beihilfe portion
+- **Classic** — the standard role-based split; employee paid the full invoice upfront and claims both PKV and Beihilfe shares
+- **Beihilfe-only** — 100% Beihilfe regardless of role; PKV not applicable (e.g. Heilpraktiker not covered by PKV)
+- **Direct billing** — the provider has already billed PKV directly; the employee receives only the Beihilfe portion as an invoice and claims 100% of it from Beihilfe; PKV not applicable
 
 | Role | Classic | Direct billing | Beihilfe-only |
 |---|---|---|---|
-| Employee | 50% Beihilfe / 50% PKV | 50% Beihilfe only | 100% / 0% |
-| Employee (2+ children) | 70% Beihilfe / 30% PKV | 70% Beihilfe only | 100% / 0% |
-| Spouse | 70% Beihilfe / 30% PKV | 70% Beihilfe only | 100% / 0% |
-| Child | 80% Beihilfe / 20% PKV | 80% Beihilfe only | 100% / 0% |
+| Employee | 50% Beihilfe / 50% PKV | 100% Beihilfe | 100% Beihilfe |
+| Employee (2+ children) | 70% Beihilfe / 30% PKV | 100% Beihilfe | 100% Beihilfe |
+| Spouse | 70% Beihilfe / 30% PKV | 100% Beihilfe | 100% Beihilfe |
+| Child | 80% Beihilfe / 20% PKV | 100% Beihilfe | 100% Beihilfe |
 
 The `split_type` is set at intake and drives the split matrix lookup. For `beihilfe_only` and `direct_billing`, `pkv_claim_status` is automatically set to `not_applicable`.
 
@@ -167,7 +167,7 @@ The document received back from PKV or Beihilfe. Needs to be captured (PDF) and 
 | `payment_status` | `open` / `paid` |
 
 ### Payment
-A cash transaction — either inbound (reimbursement from PKV or Beihilfe) or outbound (employee paying the provider). Payments can be captured as unmatched bank transactions first, then matched to their entity later.
+A cash transaction — either inbound (reimbursement from PKV or Beihilfe) or outbound (employee paying the provider). Payments can be bulk-imported from a bank CSV export or entered manually; they are matched to their entity separately.
 
 | Field | Description |
 |---|---|
@@ -176,13 +176,15 @@ A cash transaction — either inbound (reimbursement from PKV or Beihilfe) or ou
 | `date` | Transaction date |
 | `amount` | Transaction amount |
 | `settlement_report_id` | FK → Settlement Report (inbound only; null until matched) |
-| `invoice_id` | FK → Invoice (outbound only; null until matched) |
-| `discrepancy` | `amount − settlement_report.total_reimbursed` (inbound); `amount − invoice.employee_net_expected` (outbound) |
-| `bank_reference` | Reference from the bank statement |
-| `match_status` | `unmatched` / `matched` |
-| `counterparty` | Bank statement description (sender/recipient name) |
+| `discrepancy` | `amount − settlement_report.total_reimbursed` (computed on match) |
+| `bank_reference` | Verwendungszweck from the bank statement |
+| `match_status` | `unmatched` / `matched` / `out_of_scope` |
+| `counterparty` | Bank statement sender/recipient name |
+| `import_fingerprint` | SHA-1 dedup key for CSV imports — prevents re-importing the same transaction |
 
 > **Reconciliation note (inbound):** the payment amount should equal `settlement_report.total_reimbursed`. Any discrepancy is flagged before the report is marked as paid.
+>
+> **Out-of-scope:** payments irrelevant to healthcare tracking (groceries, rent, …) are marked `out_of_scope` — either at import time or interactively during `match-payments`. They are stored for audit completeness but never surfaced in matching workflows.
 
 ### Settlement Line Item
 One row per invoice resolved within a settlement report. The line item is the audit trail for every euro gap between what was claimed and what was paid. Links directly to an invoice — there is no intermediate claim entity.
@@ -237,26 +239,28 @@ The system tracks `consumed_ytd` automatically as Beihilfe settlement line items
 
 ## Process Triggers
 
-There are exactly three events that drive work in the system:
-
 | Trigger | CLI command | What it creates |
 |---|---|---|
-| **Document captured** | `add-document` | `Document` (pending) → routes to `add-invoice` or `add-settlement-report` |
-| **Bank transaction imported** | `add-payment` | `Payment` (unmatched) |
+| **Document captured** | `add-document` | `Document` → OCR auto-classifies → routes to Invoice or SettlementReport |
+| **Bank statement imported** | `import-payments <csv>` | Bulk `Payment` rows (unmatched); non-health rows pre-labelled `out_of_scope` |
+| **Single payment entered** | `add-payment` | One `Payment` (unmatched) |
 | **Claim submitted** | `submit` | Updates `*_submitted_at` and `*_claim_status = claimed` on Invoice |
 
-Payments are matched to their entities separately via `match-payments`, which cascades status updates to the linked Invoice or SettlementReport.
+Payments are matched to their entities via `match-payments`, which cascades status updates to the linked Invoice or SettlementReport.
 
 ---
 
 ## Workflows
 
 ### add-document
-1. User provides file path and document type (or `unknown` for AI classification later)
-2. Document record created with `status = pending`
-3. If type is `invoice`: optionally chains directly into `add-invoice`
-4. If type is `settlement_report`: optionally chains directly into `add-settlement-report`
-5. On completion, `Document.linked_entity_id` is set and `status → processed`
+Captures a source file (PDF or image), extracts structured data via Claude OCR, and routes to the appropriate creation workflow.
+
+1. User provides a local file path (or `--all` to process every file in the Drive Inbox)
+2. Claude API extracts document data: detects document type (`invoice` / `settlement_report`), provider, dates, amounts, and patient name
+3. If confidence is insufficient, user is prompted to confirm or correct the classification
+4. **Invoice path:** extracted fields pre-fill the add-invoice flow; user reviews and confirms
+5. **Settlement report path:** extracted fields pre-fill the add-settlement-report flow; line items are presented for review
+6. On confirmation, `Document.linked_entity_id` is set and `status → processed`; file is archived to Google Drive
 
 ### add-invoice (WF-1)
 1. User selects person, split type, provider, dates, and total amount
@@ -301,19 +305,28 @@ The actual bank transfer arrives separately (typically days after the report). U
 3. System calculates `discrepancy = payment_amount − report.total_reimbursed`; flags if non-trivial
 4. Payment saved with `match_status = matched`; report `payment_status → paid`; invoice `*_payment_status → received` cascaded to all line-item invoices
 
+### import-payments
+Bulk-imports a C24 bank statement CSV export and optionally runs `match-payments` immediately.
+
+1. CSV is parsed and deduplicated against existing payments via `import_fingerprint` (SHA-1 of date + abs(amount) + Verwendungszweck) — re-importing the same file is safe
+2. C24 category tags are used to pre-classify rows: `Kategorie = Gesundheit` or `Unterkategorie = Beihilfe` → health; everything else → `out_of_scope`
+3. User sees a numbered preview table (non-health rows shown dimmed); can toggle any row's classification
+4. On confirmation, all rows are saved in a single API call: health rows as `unmatched`, the rest as `out_of_scope`
+5. Option to run `match-payments` immediately after import
+
 ### add-payment
-Captures a raw bank transaction without linking it to any entity yet.
+Captures a single raw bank transaction without linking it to any entity yet.
 
 1. User provides direction, date, amount, counterparty, optional bank reference
 2. Payment saved with `match_status = unmatched`
 
 ### match-payments
-Processes all unmatched payments interactively.
+Processes all unmatched payments interactively. `out_of_scope` payments are never shown here.
 
 1. For each unmatched payment, system suggests candidates:
    - Outbound → invoices where `employee_net_expected ≈ payment.amount` and `payment_status ≠ paid`
    - Inbound → settlement reports where `total_reimbursed ≈ payment.amount` and `payment_status ≠ paid`
-2. User confirms or provides manual ID
+2. User confirms, provides a manual ID, or marks the payment as `out_of_scope` (`x`) to permanently dismiss it from future matching
 3. On confirmation: payment linked, `match_status → matched`, status updates cascaded
 
 ### dashboard (WF-5)
