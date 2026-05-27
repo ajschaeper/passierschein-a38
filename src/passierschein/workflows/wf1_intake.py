@@ -7,17 +7,37 @@ resolves the split, and persists to Google Sheets.
 """
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+from typing import Optional
+
 from rich.console import Console
 from rich.prompt import Confirm
 from rich.table import Table
 
 from ..adapters.manual_entry import enter_invoice
 from ..adapters.sheets import SheetsRepository
-from typing import Optional
-
 from ..domain.models import Invoice
 
 console = Console()
+
+
+def _find_duplicates(
+    existing: list[Invoice],
+    provider: str,
+    date_of_service: date,
+    total_amount: Decimal,
+    person_id: str,
+) -> list[Invoice]:
+    """Return invoices that match on provider (case-insensitive), date, amount, and patient."""
+    needle = provider.lower().strip()
+    return [
+        inv for inv in existing
+        if (inv.provider.lower().strip() == needle
+            and inv.date_of_service == date_of_service
+            and inv.total_amount == total_amount
+            and inv.person_id == person_id)
+    ]
 
 
 def run(
@@ -34,6 +54,41 @@ def run(
     fields = enter_invoice(persons, two_plus_children=two_plus, ocr_hints=ocr_hints or {})
     if document_id:
         fields["document_id"] = document_id
+
+    # Duplicate check
+    dupes = _find_duplicates(
+        repo.invoices.get_all(),
+        fields["provider"],
+        fields["date_of_service"],
+        fields["total_amount"],
+        fields["person_id"],
+    )
+    if dupes:
+        console.print(
+            f"\n[bold yellow]⚠  Possible duplicate — "
+            f"{len(dupes)} existing invoice(s) match provider, date, and amount:[/bold yellow]"
+        )
+        dt = Table(show_lines=True)
+        dt.add_column("ID")
+        dt.add_column("Provider")
+        dt.add_column("Date of service")
+        dt.add_column("Amount", justify="right")
+        dt.add_column("Person")
+        dt.add_column("Payment")
+        for inv in dupes:
+            dt.add_row(
+                inv.id[:8] + "…",
+                inv.provider,
+                str(inv.date_of_service),
+                f"€ {inv.total_amount:,.2f}",
+                persons_map.get(inv.person_id, inv.person_id[:8] + "…"),
+                str(inv.payment_status),
+            )
+        console.print(dt)
+        if not Confirm.ask("Save anyway?", default=False):
+            console.print("[yellow]Aborted.[/yellow]")
+            return None
+
     invoice = Invoice(**fields)
 
     # Confirmation summary
