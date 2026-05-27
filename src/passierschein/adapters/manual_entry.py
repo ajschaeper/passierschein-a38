@@ -445,17 +445,16 @@ def enter_bank_transaction() -> dict:
 def enter_document(drive_files: list[dict] | None = None) -> dict:
     """Prompt for a new document record. Shows a Drive file picker if files are provided.
 
-    When a Drive file is selected:
-    - captured_at is set automatically from the file's createdTime (no prompt)
-    - document_type is auto-accepted when inferred from a recognised subfolder name
+    No document_type prompt — type is determined by OCR (with folder-name as
+    a fallback hint when OCR is inconclusive; see _resolve_type in wf_add_document).
+    When a Drive file is selected, captured_at is set from the file's createdTime.
     """
     from passierschein.domain.enums import DocumentType
     console.rule("[bold cyan]New Document")
 
-    file_path:       str              = ""
-    default_type:    DocumentType     = DocumentType.UNKNOWN
-    captured:        date | None      = None
-    type_confident:  bool             = False
+    file_path:    str          = ""
+    doc_type:     DocumentType = DocumentType.UNKNOWN  # OCR will determine the real type
+    captured:     date | None  = None
 
     if drive_files:
         t = Table(title="Files in Google Drive Inbox", show_lines=True)
@@ -472,8 +471,8 @@ def enter_document(drive_files: list[dict] | None = None) -> dict:
         try:
             idx = int(raw)
             if 1 <= idx <= len(drive_files):
-                chosen      = drive_files[idx - 1]
-                file_path   = chosen["id"]
+                chosen    = drive_files[idx - 1]
+                file_path = chosen["id"]
 
                 # captured_at from Drive createdTime
                 created_str = chosen.get("createdTime") or ""
@@ -481,29 +480,24 @@ def enter_document(drive_files: list[dict] | None = None) -> dict:
                     captured = date.fromisoformat(created_str[:10])
                     console.print(f"  Captured at [dim](Drive ✓)[/dim]: {captured}")
 
-                # Type inference from subfolder — confident only for known folder names
+                # Folder hint — not authoritative; OCR decides the real type.
+                # Stored as the initial Document.document_type so _resolve_type
+                # can fall back to it if OCR fails entirely.
                 folder_path = (chosen.get("folder_path") or "").lower()
                 name_lower  = chosen["name"].lower()
                 if "rechnungen" in folder_path:
-                    default_type, type_confident = DocumentType.INVOICE, True
+                    doc_type = DocumentType.INVOICE
                 elif any(kw in folder_path for kw in ("bescheid", "pkv-abrechnung", "pkv_abrechnung")):
-                    default_type, type_confident = DocumentType.SETTLEMENT_REPORT, True
+                    doc_type = DocumentType.SETTLEMENT_REPORT
                 elif any(kw in name_lower for kw in ("bescheid", "abrechnung", "erstattung", "leistung")):
-                    default_type = DocumentType.SETTLEMENT_REPORT
+                    doc_type = DocumentType.SETTLEMENT_REPORT
                 else:
-                    default_type = DocumentType.INVOICE
+                    doc_type = DocumentType.INVOICE
         except (ValueError, IndexError):
             pass
 
     if not file_path:
         file_path = Prompt.ask("File path")
-
-    # doc_type: auto-accept if folder was unambiguous, otherwise prompt
-    if type_confident:
-        console.print(f"  Document type [dim](folder ✓)[/dim]: [bold]{default_type.value}[/bold]")
-        doc_type = default_type
-    else:
-        doc_type = prompt_enum("Document type", DocumentType, default=default_type)
 
     # captured_at: already set from Drive, otherwise prompt
     if captured is None:
