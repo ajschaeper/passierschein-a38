@@ -155,17 +155,28 @@ def _select_invoices_for_outbound(payment: Payment, repo: SheetsRepository) -> L
 # Main
 # ---------------------------------------------------------------------------
 
+def _mark_out_of_scope(payment: Payment, repo: SheetsRepository) -> None:
+    payment.match_status = PaymentMatchStatus.OUT_OF_SCOPE
+    repo.payments.update(payment)
+    console.print("[dim]→ Marked as out-of-scope.[/dim]")
+
+
 def run(repo: SheetsRepository | None = None) -> None:
     repo = repo or SheetsRepository()
 
     all_payments = repo.payments.get_all()
-    unmatched    = [p for p in all_payments if str(p.match_status) == "unmatched"]
+    # Skip already matched and permanently dismissed payments
+    unmatched = [
+        p for p in all_payments
+        if str(p.match_status) == "unmatched"
+    ]
 
     if not unmatched:
         console.print("[green]No unmatched payments.[/green]")
         return
 
     console.rule(f"[bold blue]WF-MATCH — {len(unmatched)} unmatched payment(s)")
+    console.print("[dim]  Commands: match a transaction, 'skip' (come back later), or 'x' (out-of-scope, never show again)[/dim]")
 
     for payment in unmatched:
         console.print(
@@ -186,10 +197,13 @@ def run(repo: SheetsRepository | None = None) -> None:
                 f"\nSelected {len(selected)} invoice(s), total €{total:,.2f}  "
                 f"(payment €{payment.amount:,.2f})"
             )
-            if not Confirm.ask("Confirm match?", default=True):
+            raw = Prompt.ask("Confirm match? ([bold]y[/bold] / n / [bold]x[/bold] out-of-scope)", default="y")
+            if raw.strip().lower() == "x":
+                _mark_out_of_scope(payment, repo)
+            elif raw.strip().lower() in ("y", ""):
+                _match_outbound(payment, selected, repo)
+            else:
                 console.print("[yellow]Skipped.[/yellow]")
-                continue
-            _match_outbound(payment, selected, repo)
 
         else:  # inbound
             candidates = _suggest_inbound(payment, repo)
@@ -201,13 +215,19 @@ def run(repo: SheetsRepository | None = None) -> None:
                     t.add_row(str(i), f"{r.id[:8]}… | {r.report_reference} | €{r.total_reimbursed:,.2f} | {r.received_at}")
                 console.print(t)
                 raw = Prompt.ask(
-                    "Select # or enter report ID (or 'skip')",
+                    "Select # or report ID  (or 'skip' / 'x' out-of-scope)",
                     default="1" if len(candidates) == 1 else "skip",
                 )
             else:
                 console.print("[yellow]No automatic suggestions.[/yellow]")
-                raw = Prompt.ask("Enter settlement report ID (or 'skip')", default="skip")
+                raw = Prompt.ask(
+                    "Enter report ID  (or 'skip' / 'x' out-of-scope)",
+                    default="skip",
+                )
 
+            if raw.strip().lower() == "x":
+                _mark_out_of_scope(payment, repo)
+                continue
             if raw.strip().lower() == "skip":
                 continue
             try:

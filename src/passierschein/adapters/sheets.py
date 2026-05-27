@@ -70,7 +70,7 @@ SHEET_HEADERS: Dict[str, List[str]] = {
     "payments": [
         "id", "direction", "date", "amount",
         "settlement_report_id", "discrepancy", "bank_reference",
-        "match_status", "counterparty",
+        "match_status", "counterparty", "import_fingerprint",
     ],
     "beihilfe_deductible": [
         "year", "configured_amount", "consumed_ytd", "remaining",
@@ -214,8 +214,13 @@ class SheetTable(Generic[T]):
             self.append(model)
 
     def get_all(self) -> List[T]:
+        # Pass expected_headers so gspread reads columns positionally from our
+        # schema rather than relying on the sheet's row-1 labels.  This avoids
+        # GSpreadException when the header row contains duplicates (a transient
+        # state that can arise after schema migrations).
         records = self._ws.get_all_records(
             value_render_option="UNFORMATTED_VALUE",
+            expected_headers=self._headers,
         )
         result = []
         for rec in records:
@@ -237,6 +242,31 @@ class SheetTable(Generic[T]):
 
     def get_by_field(self, field: str, value: str) -> List[T]:
         return [m for m in self.get_all() if str(getattr(m, field, None)) == value]
+
+    def sync_headers(self) -> tuple[bool, list[str], list[str]]:
+        """
+        Overwrite row 1 with self._headers and clear any extra columns beyond
+        the expected width (stale columns from old schema versions).
+
+        Returns (changed, old_headers, new_headers).
+        Safe: only row 1 (the header row) is ever written.
+        """
+        actual   = self._ws.row_values(1)   # current header row (may be wider)
+        expected = self._headers
+
+        if list(actual) == list(expected):
+            return False, list(actual), list(expected)
+
+        # Build a row wide enough to overwrite any stale columns:
+        #   first len(expected) cells = expected header names
+        #   any extra cells (old columns) = "" to clear them
+        max_width  = max(len(actual), len(expected))
+        padded_row = list(expected) + [""] * (max_width - len(expected))
+        col_end    = _col_letter(max_width)
+
+        self._ws.update(f"A1:{col_end}1", [padded_row], value_input_option="RAW")
+        log.info("sync_headers: updated row 1 from %s → %s", actual, expected)
+        return True, list(actual), list(expected)
 
 
 # ---------------------------------------------------------------------------

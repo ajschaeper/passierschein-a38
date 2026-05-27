@@ -34,6 +34,7 @@ from passierschein.workflows import (
     wf6_alerts,
     wf_add_document,
     wf_add_payment,
+    wf_import_payments,
     wf_match_payment,
 )
 
@@ -140,10 +141,62 @@ def add_payment() -> None:
     wf_add_payment.run()
 
 
+@app.command("import-payments")
+def import_payments(
+    file: str = typer.Argument(..., help="C24 Bank CSV export file"),
+) -> None:
+    """Bulk-import a C24 bank statement CSV → Payments, then auto-match."""
+    repo = SheetsRepository()
+    wf_import_payments.run(repo=repo, csv_file=file)
+
+
 @app.command("match-payments")
 def match_payments() -> None:
     """Match unmatched bank payments to invoices or settlement reports."""
     wf_match_payment.run()
+
+
+@app.command("migrate-sheet")
+def migrate_sheet() -> None:
+    """Sync all sheet tab header rows to match the current code schema.
+
+    Run this once after any schema change (e.g. adding a new column).
+    Only row 1 of each tab is ever modified — data rows are untouched.
+    """
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    repo = SheetsRepository()
+
+    tabs = {
+        "invoices":              repo.invoices,
+        "settlement_reports":    repo.settlement_reports,
+        "settlement_line_items": repo.settlement_line_items,
+        "payments":              repo.payments,
+        "documents":             repo.documents,
+        "persons":               repo.persons,
+    }
+
+    t = Table(title="Sheet header migration", show_lines=True)
+    t.add_column("Tab")
+    t.add_column("Status")
+    t.add_column("Change")
+
+    for name, table in tabs.items():
+        changed, old, new = table.sync_headers()
+        if changed:
+            added   = [c for c in new if c not in old]
+            removed = [c for c in old if c not in new]
+            detail  = ""
+            if added:
+                detail += f"[green]+{', '.join(added)}[/green]  "
+            if removed:
+                detail += f"[red]−{', '.join(removed)}[/red]"
+            t.add_row(name, "[bold green]updated[/bold green]", detail.strip())
+        else:
+            t.add_row(name, "[dim]ok[/dim]", "[dim]no change[/dim]")
+
+    console.print(t)
 
 
 @app.command()

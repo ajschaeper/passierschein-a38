@@ -76,5 +76,6 @@ class DocumentStatus(str, Enum):
 
 
 class PaymentMatchStatus(str, Enum):
-    UNMATCHED = "unmatched"
-    MATCHED   = "matched"
+    UNMATCHED    = "unmatched"
+    MATCHED      = "matched"
+    OUT_OF_SCOPE = "out_of_scope"   # irrelevant transaction (groceries, rent, …)

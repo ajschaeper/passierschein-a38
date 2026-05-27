@@ -200,6 +200,7 @@ class Payment(BaseModel):
     bank_reference:        Optional[str]  = None
     match_status:          PaymentMatchStatus = PaymentMatchStatus.UNMATCHED
     counterparty:          Optional[str]  = None  # bank transaction description
+    import_fingerprint:    Optional[str]  = None  # sha1 dedup key for CSV imports
 
     class Config:
         use_enum_values = True

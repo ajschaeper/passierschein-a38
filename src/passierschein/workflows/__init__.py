@@ -7,5 +7,6 @@ from . import (
     wf6_alerts,
     wf_add_document,
     wf_add_payment,
+    wf_import_payments,
     wf_match_payment,
 )
