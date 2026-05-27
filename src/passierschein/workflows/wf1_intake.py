@@ -45,6 +45,7 @@ def run(
     dry_run: bool = False,
     document_id: str | None = None,
     ocr_hints: dict | None = None,
+    _session_invoices: list[Invoice] | None = None,
 ) -> Optional[Invoice]:
     repo = repo or SheetsRepository()
     two_plus = repo.two_plus_children()
@@ -56,8 +57,10 @@ def run(
         fields["document_id"] = document_id
 
     # Duplicate check
+    # Combine sheet data with any invoices saved earlier in the same session
+    # (Sheets API writes may not be visible to the next get_all() immediately)
     dupes = _find_duplicates(
-        repo.invoices.get_all(),
+        repo.invoices.get_all() + (_session_invoices or []),
         fields["provider"],
         fields["date_of_service"],
         fields["total_amount"],
@@ -112,6 +115,8 @@ def run(
 
     if Confirm.ask("Save to Sheets?", default=True):
         repo.invoices.append(invoice)
+        if _session_invoices is not None:
+            _session_invoices.append(invoice)
         console.print(f"[bold green]✓ Invoice {invoice.id} saved.[/bold green]")
         return invoice
 
