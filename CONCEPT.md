@@ -342,14 +342,12 @@ Processes all unmatched payments interactively. `out_of_scope` payments are neve
 
 ## Tech Stack
 
-### Now — Local Python + Google Sheets
-
-| Layer | Technology | Role |
-|---|---|---|
-| Runtime | Local Python scripts | Orchestration, business logic |
-| Storage / UI | Google Sheets (via `gspread`) | Database, manual input, dashboards |
-| OCR / AI | Claude API (multimodal) | Invoice extraction from PDF/image |
-| Document storage | Local filesystem / Google Drive | Raw invoice files |
+| Layer | Technology |
+|---|---|
+| Runtime / UI | Local Python scripts |
+| DB storage | Google Sheets (via `gspread`) |
+| File storage | Google Drive |
+| OCR / AI | Claude API (multimodal) |
 
 **Google Sheets structure:**
 
@@ -363,20 +361,6 @@ Processes all unmatched payments interactively. `out_of_scope` payments are neve
 | `beihilfe_deductible` | Annual deductible config + consumed YTD (one row per year) |
 | `persons` | Household members with role, used to resolve split matrix |
 | `split_matrix` | `(role × split_type) → PKV% / Beihilfe%` |
-
-Google Sheets doubles as the UI for now — formatted views, conditional formatting for status, and manual overrides without needing a frontend.
-
-### Later — AWS
-
-| Layer | Technology |
-|---|---|
-| Compute | AWS Lambda (Python) |
-| Document storage | S3 |
-| Database | DynamoDB or RDS (PostgreSQL) |
-| Scheduling | EventBridge |
-| Secrets | AWS Secrets Manager |
-
-The Python business logic is written to be runtime-agnostic (no Sheets-specific coupling in the core domain layer) so migration is a matter of swapping the persistence adapter.
 
 ---
 
