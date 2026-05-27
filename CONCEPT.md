@@ -261,19 +261,19 @@ Captures a source file (PDF or image), extracts structured data via Claude OCR, 
 5. **Settlement report path:** extracted fields pre-fill the add-settlement-report flow; line items are presented for review
 6. On confirmation, `Document.linked_entity_id` is set and `status → processed`; file is archived to Google Drive
 
-### add-invoice (WF-1)
+### add-invoice
 1. User selects person, split type, provider, dates, and total amount
 2. System resolves the split via `split_matrix[person.role][split_type]`
 3. For `beihilfe_only`: `employee_net_expected` = full invoice amount (already the Beihilfe portion); `pkv_claim_status` set to `not_applicable`
 4. User confirms; invoice saved with `payment_status = open`, claims `open`
 
-### set-paid-out (WF-2)
+### set-paid-out
 1. User selects an invoice
 2. System suggests `employee_net_expected` as the payment amount
 3. User confirms date, amount, bank reference, counterparty
 4. Payment saved with `match_status = matched`; invoice `payment_status → paid`
 
-### submit (WF-3)
+### submit
 The workflow is the same for PKV and Beihilfe. Submission is recorded directly on the invoice — there is no separate claim entity.
 
 1. User selects one or more invoices and indicates which side is being submitted (`pkv`, `beihilfe`, or `both`)
@@ -282,7 +282,7 @@ The workflow is the same for PKV and Beihilfe. Submission is recorded directly o
 
 > What we track is simply: *did we send this, and when?* How the insurer groups or processes submissions on their end is their concern, reflected in the settlement report when it arrives.
 
-### add-settlement-report (WF-4A)
+### add-settlement-report
 When a settlement report (Leistungsabrechnung / Beihilfebescheid) arrives from PKV or Beihilfe:
 
 1. User enters report metadata (type, reference, received date, total)
@@ -298,7 +298,7 @@ The actual bank transfer arrives separately (typically days after the report). U
 
 > **Separation of concerns:** the report tells you *why* each euro was or wasn't reimbursed; the payment tells you the cash actually arrived. Both must be present before an invoice can be considered fully settled.
 
-### set-paid-in (WF-4B)
+### set-paid-in
 1. User identifies the settlement report (by ID or reference number)
 2. User confirms payment date, amount, bank reference
 3. System calculates `discrepancy = payment_amount − report.total_reimbursed`; flags if non-trivial
@@ -328,12 +328,12 @@ Processes all unmatched payments interactively. `out_of_scope` payments are neve
 2. User confirms, provides a manual ID, or marks the payment as `out_of_scope` (`x`) to permanently dismiss it from future matching
 3. On confirmation: payment linked, `match_status → matched`, status updates cascaded
 
-### dashboard (WF-5)
+### dashboard
 - Cashflow summary: total invoiced, paid out, payments due, total reimbursed, net exposure
 - PKV and Beihilfe inflows pending (submitted but not yet reimbursed)
 - Open invoices table sorted by due date, with person name, split ratios, and all status tracks
 
-### alerts (WF-6)
+### alerts
 - Invoices received but not yet paid (approaching due date)
 - Claims submitted but no reimbursement after N weeks
 - PKV settled but Beihilfe still pending (common scenario)
