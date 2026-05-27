@@ -12,7 +12,7 @@ class PatientRole(str, Enum):
 class SplitType(str, Enum):
     CLASSIC        = "classic"         # role-based PKV+Beihilfe split; employee paid full invoice
     BEIHILFE_ONLY  = "beihilfe_only"   # 100% Beihilfe, PKV not applicable
-    DIRECT_BILLING = "direct_billing"  # PKV billed directly to provider; employee claims Beihilfe only
+    DIRECT_BILLING = "direct_billing"  # deprecated alias for beihilfe_only — kept for backward compat
 
 
 class InvoiceType(str, Enum):

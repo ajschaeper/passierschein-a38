@@ -207,17 +207,23 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
         person = persons[idx]
 
     # Split type — from OCR hint
+    # direct_billing is a deprecated alias → normalise to beihilfe_only
     split_type_map = {
         "classic":        SplitType.CLASSIC,
         "beihilfe_only":  SplitType.BEIHILFE_ONLY,
-        "direct_billing": SplitType.DIRECT_BILLING,
+        "direct_billing": SplitType.BEIHILFE_ONLY,  # legacy OCR hint
     }
     default_split = split_type_map.get(ocr.get("split_type_hint", ""), SplitType.CLASSIC)
     if _auto(ocr, "split_type_hint", ocr.get("split_type_hint")):
         split_type = default_split
         console.print(f"  Split type [dim](OCR ✓)[/dim]: {split_type.value}")
     else:
-        split_type = prompt_enum(f"Split type{ocr_tag}", SplitType, default=default_split)
+        # Only show the two active options — direct_billing is deprecated
+        _ACTIVE_SPLIT_TYPES = [SplitType.CLASSIC, SplitType.BEIHILFE_ONLY]
+        console.print(f"  [dim]Options: {', '.join(t.value for t in _ACTIVE_SPLIT_TYPES)}[/dim]")
+        from rich.prompt import Prompt as _Prompt
+        raw = _Prompt.ask(f"Split type{ocr_tag}", default=default_split.value)
+        split_type = SplitType(raw)
 
     # Provider
     default_provider = ocr.get("provider") or random.choice(_PROVIDERS)

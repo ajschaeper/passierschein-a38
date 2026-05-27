@@ -13,20 +13,19 @@ Every medical invoice triggers two parallel reimbursement processes:
 1. **PKV (Private Krankenversicherung)** — the employee's private health insurer, covering a fixed percentage of eligible costs
 2. **Beihilfe** — the employer (federal/state government), covering the remaining percentage directly
 
-The Beihilfe share is determined by a `(person role × split type)` matrix. There are three split types:
+The Beihilfe share is determined by a `(person role × split type)` matrix. There are two split types:
 
-- **Classic** — the standard role-based split, employee paid the full invoice upfront
-- **Beihilfe-only** — 100% Beihilfe regardless of role, PKV not applicable
-- **Direct billing** — the same role-based percentages as classic, but the provider invoiced PKV directly; the employee only pays (and claims) the Beihilfe portion
+- **Classic** — the standard role-based split; employee paid the full invoice upfront and claims both PKV and Beihilfe shares
+- **Beihilfe-only** — 100% Beihilfe regardless of role; PKV not applicable. Covers two scenarios: (a) service not covered by PKV at all (e.g. Heilpraktiker); (b) provider already billed PKV directly and issued only the Beihilfe portion to the employee — the outcome is identical in both cases
 
-| Role | Classic | Direct billing | Beihilfe-only |
-|---|---|---|---|
-| Employee | 50% Beihilfe / 50% PKV | 50% Beihilfe only | 100% / 0% |
-| Employee (2+ children) | 70% Beihilfe / 30% PKV | 70% Beihilfe only | 100% / 0% |
-| Spouse | 70% Beihilfe / 30% PKV | 70% Beihilfe only | 100% / 0% |
-| Child | 80% Beihilfe / 20% PKV | 80% Beihilfe only | 100% / 0% |
+| Role | Classic | Beihilfe-only |
+|---|---|---|
+| Employee | 50% Beihilfe / 50% PKV | 100% Beihilfe |
+| Employee (2+ children) | 70% Beihilfe / 30% PKV | 100% Beihilfe |
+| Spouse | 70% Beihilfe / 30% PKV | 100% Beihilfe |
+| Child | 80% Beihilfe / 20% PKV | 100% Beihilfe |
 
-The `split_type` is set at intake and drives the split matrix lookup. For `beihilfe_only` and `direct_billing`, `pkv_claim_status` is automatically set to `not_applicable`.
+The `split_type` is set at intake and drives the split matrix lookup. For `beihilfe_only`, `pkv_claim_status` is automatically set to `not_applicable`.
 
 This means every invoice must be analysed, split, and submitted to two different institutions with different forms, deadlines, and processes.
 
@@ -116,7 +115,7 @@ The invoice is the **leading entity** of the data model. All claim, settlement, 
 | `id` | Unique identifier |
 | `person_id` | FK → Person |
 | `invoice_type` | Optional categorisation: `ambulant` / `stationaer` / `dental_basic` / `zahnersatz` / `kfo` / `psychotherapy` / `hilfsmittel` / `arzneimittel` / `heilmittel` / `other` (default) |
-| `split_type` | `classic` / `beihilfe_only` / `direct_billing` — drives the split matrix lookup |
+| `split_type` | `classic` / `beihilfe_only` — drives the split matrix lookup |
 | `provider` | Doctor, hospital, pharmacy, etc. |
 | `date_of_service` | When the medical service was rendered |
 | `date_received` | When the invoice arrived |
@@ -167,7 +166,7 @@ The document received back from PKV or Beihilfe. Needs to be captured (PDF) and 
 | `payment_status` | `open` / `paid` |
 
 ### Payment
-A cash transaction — either inbound (reimbursement from PKV or Beihilfe) or outbound (employee paying the provider). Payments can be captured as unmatched bank transactions first, then matched to their entity later.
+A cash transaction — either inbound (reimbursement from PKV or Beihilfe) or outbound (employee paying the provider). Payments can be bulk-imported from a bank CSV export or entered manually; they are matched to their entity separately.
 
 | Field | Description |
 |---|---|
@@ -176,13 +175,15 @@ A cash transaction — either inbound (reimbursement from PKV or Beihilfe) or ou
 | `date` | Transaction date |
 | `amount` | Transaction amount |
 | `settlement_report_id` | FK → Settlement Report (inbound only; null until matched) |
-| `invoice_id` | FK → Invoice (outbound only; null until matched) |
-| `discrepancy` | `amount − settlement_report.total_reimbursed` (inbound); `amount − invoice.employee_net_expected` (outbound) |
-| `bank_reference` | Reference from the bank statement |
-| `match_status` | `unmatched` / `matched` |
-| `counterparty` | Bank statement description (sender/recipient name) |
+| `discrepancy` | `amount − settlement_report.total_reimbursed` (computed on match) |
+| `bank_reference` | Verwendungszweck from the bank statement |
+| `match_status` | `unmatched` / `matched` / `out_of_scope` |
+| `counterparty` | Bank statement sender/recipient name |
+| `import_fingerprint` | SHA-1 dedup key for CSV imports — prevents re-importing the same transaction |
 
 > **Reconciliation note (inbound):** the payment amount should equal `settlement_report.total_reimbursed`. Any discrepancy is flagged before the report is marked as paid.
+>
+> **Out-of-scope:** payments irrelevant to healthcare tracking (groceries, rent, …) are marked `out_of_scope` — either at import time or interactively during `match-payments`. They are stored for audit completeness but never surfaced in matching workflows.
 
 ### Settlement Line Item
 One row per invoice resolved within a settlement report. The line item is the audit trail for every euro gap between what was claimed and what was paid. Links directly to an invoice — there is no intermediate claim entity.
@@ -237,40 +238,42 @@ The system tracks `consumed_ytd` automatically as Beihilfe settlement line items
 
 ## Process Triggers
 
-There are exactly three events that drive work in the system:
-
 | Trigger | CLI command | What it creates |
 |---|---|---|
-| **Document captured** | `add-document` | `Document` (pending) → routes to `add-invoice` or `add-settlement-report` |
-| **Bank transaction imported** | `add-payment` | `Payment` (unmatched) |
+| **Document captured** | `add-document` | `Document` → OCR auto-classifies → routes to Invoice or SettlementReport |
+| **Bank statement imported** | `import-payments <csv>` | Bulk `Payment` rows (unmatched); non-health rows pre-labelled `out_of_scope` |
+| **Single payment entered** | `add-payment` | One `Payment` (unmatched) |
 | **Claim submitted** | `submit` | Updates `*_submitted_at` and `*_claim_status = claimed` on Invoice |
 
-Payments are matched to their entities separately via `match-payments`, which cascades status updates to the linked Invoice or SettlementReport.
+Payments are matched to their entities via `match-payments`, which cascades status updates to the linked Invoice or SettlementReport.
 
 ---
 
 ## Workflows
 
 ### add-document
-1. User provides file path and document type (or `unknown` for AI classification later)
-2. Document record created with `status = pending`
-3. If type is `invoice`: optionally chains directly into `add-invoice`
-4. If type is `settlement_report`: optionally chains directly into `add-settlement-report`
-5. On completion, `Document.linked_entity_id` is set and `status → processed`
+Captures a source file (PDF or image), extracts structured data via Claude OCR, and routes to the appropriate creation workflow.
 
-### add-invoice (WF-1)
+1. User provides a local file path (or `--all` to process every file in the Drive Inbox)
+2. Claude API extracts document data: detects document type (`invoice` / `settlement_report`), provider, dates, amounts, and patient name
+3. If confidence is insufficient, user is prompted to confirm or correct the classification
+4. **Invoice path:** extracted fields pre-fill the add-invoice flow; user reviews and confirms
+5. **Settlement report path:** extracted fields pre-fill the add-settlement-report flow; line items are presented for review
+6. On confirmation, `Document.linked_entity_id` is set and `status → processed`; file is archived to Google Drive
+
+### add-invoice
 1. User selects person, split type, provider, dates, and total amount
 2. System resolves the split via `split_matrix[person.role][split_type]`
-3. For `direct_billing`: `employee_net_expected` = Beihilfe portion only (computed automatically)
+3. For `beihilfe_only`: `employee_net_expected` = full invoice amount (already the Beihilfe portion); `pkv_claim_status` set to `not_applicable`
 4. User confirms; invoice saved with `payment_status = open`, claims `open`
 
-### set-paid-out (WF-2)
+### set-paid-out
 1. User selects an invoice
 2. System suggests `employee_net_expected` as the payment amount
 3. User confirms date, amount, bank reference, counterparty
 4. Payment saved with `match_status = matched`; invoice `payment_status → paid`
 
-### submit (WF-3)
+### submit
 The workflow is the same for PKV and Beihilfe. Submission is recorded directly on the invoice — there is no separate claim entity.
 
 1. User selects one or more invoices and indicates which side is being submitted (`pkv`, `beihilfe`, or `both`)
@@ -279,7 +282,7 @@ The workflow is the same for PKV and Beihilfe. Submission is recorded directly o
 
 > What we track is simply: *did we send this, and when?* How the insurer groups or processes submissions on their end is their concern, reflected in the settlement report when it arrives.
 
-### add-settlement-report (WF-4A)
+### add-settlement-report
 When a settlement report (Leistungsabrechnung / Beihilfebescheid) arrives from PKV or Beihilfe:
 
 1. User enters report metadata (type, reference, received date, total)
@@ -295,33 +298,42 @@ The actual bank transfer arrives separately (typically days after the report). U
 
 > **Separation of concerns:** the report tells you *why* each euro was or wasn't reimbursed; the payment tells you the cash actually arrived. Both must be present before an invoice can be considered fully settled.
 
-### set-paid-in (WF-4B)
+### set-paid-in
 1. User identifies the settlement report (by ID or reference number)
 2. User confirms payment date, amount, bank reference
 3. System calculates `discrepancy = payment_amount − report.total_reimbursed`; flags if non-trivial
 4. Payment saved with `match_status = matched`; report `payment_status → paid`; invoice `*_payment_status → received` cascaded to all line-item invoices
 
+### import-payments
+Bulk-imports a C24 bank statement CSV export and optionally runs `match-payments` immediately.
+
+1. CSV is parsed and deduplicated against existing payments via `import_fingerprint` (SHA-1 of date + abs(amount) + Verwendungszweck) — re-importing the same file is safe
+2. C24 category tags are used to pre-classify rows: `Kategorie = Gesundheit` or `Unterkategorie = Beihilfe` → health; everything else → `out_of_scope`
+3. User sees a numbered preview table (non-health rows shown dimmed); can toggle any row's classification
+4. On confirmation, all rows are saved in a single API call: health rows as `unmatched`, the rest as `out_of_scope`
+5. Option to run `match-payments` immediately after import
+
 ### add-payment
-Captures a raw bank transaction without linking it to any entity yet.
+Captures a single raw bank transaction without linking it to any entity yet.
 
 1. User provides direction, date, amount, counterparty, optional bank reference
 2. Payment saved with `match_status = unmatched`
 
 ### match-payments
-Processes all unmatched payments interactively.
+Processes all unmatched payments interactively. `out_of_scope` payments are never shown here.
 
 1. For each unmatched payment, system suggests candidates:
    - Outbound → invoices where `employee_net_expected ≈ payment.amount` and `payment_status ≠ paid`
    - Inbound → settlement reports where `total_reimbursed ≈ payment.amount` and `payment_status ≠ paid`
-2. User confirms or provides manual ID
+2. User confirms, provides a manual ID, or marks the payment as `out_of_scope` (`x`) to permanently dismiss it from future matching
 3. On confirmation: payment linked, `match_status → matched`, status updates cascaded
 
-### dashboard (WF-5)
+### dashboard
 - Cashflow summary: total invoiced, paid out, payments due, total reimbursed, net exposure
 - PKV and Beihilfe inflows pending (submitted but not yet reimbursed)
 - Open invoices table sorted by due date, with person name, split ratios, and all status tracks
 
-### alerts (WF-6)
+### alerts
 - Invoices received but not yet paid (approaching due date)
 - Claims submitted but no reimbursement after N weeks
 - PKV settled but Beihilfe still pending (common scenario)
@@ -330,14 +342,12 @@ Processes all unmatched payments interactively.
 
 ## Tech Stack
 
-### Now — Local Python + Google Sheets
-
-| Layer | Technology | Role |
-|---|---|---|
-| Runtime | Local Python scripts | Orchestration, business logic |
-| Storage / UI | Google Sheets (via `gspread`) | Database, manual input, dashboards |
-| OCR / AI | Claude API (multimodal) | Invoice extraction from PDF/image |
-| Document storage | Local filesystem / Google Drive | Raw invoice files |
+| Layer | Technology |
+|---|---|
+| Runtime / UI | Local Python scripts |
+| DB storage | Google Sheets (via `gspread`) |
+| File storage | Google Drive |
+| OCR / AI | Claude API (multimodal) |
 
 **Google Sheets structure:**
 
@@ -351,20 +361,6 @@ Processes all unmatched payments interactively.
 | `beihilfe_deductible` | Annual deductible config + consumed YTD (one row per year) |
 | `persons` | Household members with role, used to resolve split matrix |
 | `split_matrix` | `(role × split_type) → PKV% / Beihilfe%` |
-
-Google Sheets doubles as the UI for now — formatted views, conditional formatting for status, and manual overrides without needing a frontend.
-
-### Later — AWS
-
-| Layer | Technology |
-|---|---|
-| Compute | AWS Lambda (Python) |
-| Document storage | S3 |
-| Database | DynamoDB or RDS (PostgreSQL) |
-| Scheduling | EventBridge |
-| Secrets | AWS Secrets Manager |
-
-The Python business logic is written to be runtime-agnostic (no Sheets-specific coupling in the core domain layer) so migration is a matter of swapping the persistence adapter.
 
 ---
 

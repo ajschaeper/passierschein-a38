@@ -1,13 +1,19 @@
 """
 Split matrix: (PatientRole × SplitType) → (pkv_pct, beihilfe_pct)
 
-Only two split types exist:
+Two active split types:
   - classic:       role-based split (employee 50/50, spouse 30/70, child 20/80)
-  - beihilfe_only: 100% Beihilfe regardless of role
+  - beihilfe_only: 100% Beihilfe regardless of role; PKV not applicable.
+                   Covers both: service not covered by PKV (e.g. Heilpraktiker),
+                   and provider-direct-billed-PKV scenarios where only the
+                   Beihilfe portion is invoiced to the employee.
+
+  direct_billing is a deprecated alias for beihilfe_only (kept for backward
+  compatibility with existing sheet data).
 
 Special rule (§47 BBhV): employee Beihilfe share rises from 50% → 70%
-when the household has 2+ children. Detected at runtime by counting
-persons with role=child — not stored as a flag.
+when the household has 2+ children. Applies to classic only.
+Detected at runtime by counting persons with role=child — not stored as a flag.
 
 The matrix is seeded into Google Sheets on setup and can be overridden there.
 """
@@ -45,17 +51,13 @@ def _e(b: str) -> SplitEntry:
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: Dict[Tuple[PatientRole, SplitType], SplitEntry] = {
-    (PatientRole.EMPLOYEE, SplitType.CLASSIC):        _e("0.50"),
-    (PatientRole.SPOUSE,   SplitType.CLASSIC):        _e("0.70"),
-    (PatientRole.CHILD,    SplitType.CLASSIC):        _e("0.80"),
-    # direct_billing: the invoice IS already the Beihilfe portion → 100% Beihilfe, 0% PKV
-    (PatientRole.EMPLOYEE, SplitType.DIRECT_BILLING): _e("1.00"),
-    (PatientRole.SPOUSE,   SplitType.DIRECT_BILLING): _e("1.00"),
-    (PatientRole.CHILD,    SplitType.DIRECT_BILLING): _e("1.00"),
-    # beihilfe_only is 100% Beihilfe for all roles
-    (PatientRole.EMPLOYEE, SplitType.BEIHILFE_ONLY):  _e("1.00"),
-    (PatientRole.SPOUSE,   SplitType.BEIHILFE_ONLY):  _e("1.00"),
-    (PatientRole.CHILD,    SplitType.BEIHILFE_ONLY):  _e("1.00"),
+    (PatientRole.EMPLOYEE, SplitType.CLASSIC):       _e("0.50"),
+    (PatientRole.SPOUSE,   SplitType.CLASSIC):       _e("0.70"),
+    (PatientRole.CHILD,    SplitType.CLASSIC):       _e("0.80"),
+    # beihilfe_only: 100% Beihilfe for all roles (direct_billing is a deprecated alias)
+    (PatientRole.EMPLOYEE, SplitType.BEIHILFE_ONLY): _e("1.00"),
+    (PatientRole.SPOUSE,   SplitType.BEIHILFE_ONLY): _e("1.00"),
+    (PatientRole.CHILD,    SplitType.BEIHILFE_ONLY): _e("1.00"),
 }
 
 # Employee override when household has 2+ children (§47 BBhV)
@@ -75,11 +77,15 @@ class SplitMatrix:
         split_type: SplitType,
         two_plus_children: bool = False,
     ) -> SplitEntry:
+        # direct_billing is a deprecated alias — normalise to beihilfe_only
+        if split_type == SplitType.DIRECT_BILLING:
+            split_type = SplitType.BEIHILFE_ONLY
         key = (role, split_type)
         if key in self._overrides:
             return self._overrides[key]
+        # §47 BBhV: employee 50% → 70% when household has 2+ children (classic only)
         if (role == PatientRole.EMPLOYEE
-                and split_type in (SplitType.CLASSIC, SplitType.DIRECT_BILLING)
+                and split_type == SplitType.CLASSIC
                 and two_plus_children):
             return _EMPLOYEE_2PLUS_CHILDREN
         return _DEFAULTS[key]
