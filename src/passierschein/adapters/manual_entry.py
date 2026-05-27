@@ -132,13 +132,81 @@ def _parse_ocr_date(raw: Optional[str]) -> Optional[date]:
         return None
 
 
-def _match_person_by_name(patient_name: str, persons: list) -> Optional[int]:
-    """Return 0-based index of the best-matching person, or None."""
-    name_lower = patient_name.lower()
-    for i, p in enumerate(persons):
-        if p.first_name.lower() in name_lower or p.family_name.lower() in name_lower:
-            return i
+def _try_match_single(
+    name: Optional[str],
+    birth_date: Optional[date],
+    persons: list,
+) -> Optional[int]:
+    """Match one (name, birth_date) pair against the household. Returns the
+    person index or None if ambiguous / no match.
+
+    Priority:
+      1. birth_date match (unique per person, except twins). Twins are
+         disambiguated by first_name; if that doesn't help, return None.
+      2. first_name uniqueness in the household. Family name alone is
+         too ambiguous to commit to.
+    """
+    name_lower = name.lower() if name else ""
+
+    if birth_date is not None:
+        dob_hits = [i for i, p in enumerate(persons) if p.birth_date == birth_date]
+        if len(dob_hits) == 1:
+            return dob_hits[0]
+        if len(dob_hits) > 1:
+            name_hits = [
+                i for i in dob_hits
+                if name_lower and persons[i].first_name.lower() in name_lower
+            ]
+            if len(name_hits) == 1:
+                return name_hits[0]
+            return None
+
+    if name_lower:
+        first_hits = [
+            i for i, p in enumerate(persons)
+            if p.first_name.lower() in name_lower
+        ]
+        if len(first_hits) == 1:
+            return first_hits[0]
+
     return None
+
+
+def _match_person(
+    patient_name: Optional[str],
+    patient_birth_date: Optional[date],
+    persons: list,
+    self_pay_fallback_name: Optional[str] = None,
+    self_pay_fallback_birth_date: Optional[date] = None,
+) -> Optional[int]:
+    """Identify the patient against the household.
+
+    Priority:
+      1. Match using (patient_name, patient_birth_date) when present —
+         this is the labelled patient on the invoice.
+      2. If patient info is absent AND OCR signalled is_self_pay, fall back
+         to the policy holder / recipient via the *_fallback_* args. Self-pay
+         invoices have no separate patient block: the recipient is the patient.
+
+    The fallback is ONLY used when patient info is empty (i.e. OCR explicitly
+    found no labelled patient). It is never used when patient_name is present
+    but happens not to match — that case means OCR may have extracted the
+    wrong person, so we prompt rather than silently substitute.
+    """
+    if patient_name or patient_birth_date:
+        return _try_match_single(patient_name, patient_birth_date, persons)
+
+    if self_pay_fallback_name or self_pay_fallback_birth_date:
+        return _try_match_single(
+            self_pay_fallback_name, self_pay_fallback_birth_date, persons,
+        )
+
+    return None
+
+
+# Legacy name kept for compatibility with any callers — delegates to the new matcher.
+def _match_person_by_name(patient_name: str, persons: list) -> Optional[int]:
+    return _match_person(patient_name, None, persons)
 
 
 def _conf(ocr: dict, field: str) -> str:
@@ -182,12 +250,41 @@ def enter_invoice(persons: list, two_plus_children: bool, ocr_hints: dict | None
     if not persons:
         raise ValueError("No persons configured. Run setup first.")
 
-    ocr_person_idx = None
-    if ocr.get("patient_name"):
-        ocr_person_idx = _match_person_by_name(ocr["patient_name"], persons)
+    # Primary: match against the labelled patient if OCR found one.
+    # Fallback: when no patient label was found, try the policy holder —
+    # covers self-pay invoices (single adult, no patient block).
+    patient_dob = _parse_ocr_date(ocr.get("patient_birth_date"))
+    has_patient = bool(ocr.get("patient_name") or patient_dob)
 
-    # Auto-select when OCR patient_name confidence is high and a match was found
-    if ocr_person_idx is not None and _auto(ocr, "patient_name", ocr.get("patient_name")):
+    ocr_person_idx = _match_person(
+        ocr.get("patient_name"),
+        patient_dob,
+        persons,
+        self_pay_fallback_name=ocr.get("policy_holder_name"),
+        self_pay_fallback_birth_date=_parse_ocr_date(ocr.get("policy_holder_birth_date")),
+    )
+
+    # Auto-accept gate:
+    #  (a) explicit patient labelled, OCR confident → trust it
+    #  (b) self-pay: OCR *confidently* returned null patient (no label found)
+    #      AND found the policy holder with high confidence → trust the fallback
+    # Anything else (medium/low patient confidence, ambiguous fallback) goes
+    # through the menu so the user confirms — protects against silent
+    # mislinking on child invoices where OCR misidentifies the patient.
+    _patient_high = has_patient and (
+        _auto(ocr, "patient_birth_date", ocr.get("patient_birth_date"))
+        or _auto(ocr, "patient_name", ocr.get("patient_name"))
+    )
+    _self_pay_high = (
+        not has_patient                              # OCR returned null patient
+        and _conf(ocr, "patient_name") == "high"     # …confidently (no entry in _confidence map)
+        and (
+            _auto(ocr, "policy_holder_birth_date", ocr.get("policy_holder_birth_date"))
+            or _auto(ocr, "policy_holder_name", ocr.get("policy_holder_name"))
+        )
+    )
+    _ocr_person_auto = _patient_high or _self_pay_high
+    if ocr_person_idx is not None and _ocr_person_auto:
         person = persons[ocr_person_idx]
         console.print(
             f"  Person [dim](OCR ✓)[/dim]: [bold]{person.first_name} {person.family_name}[/bold]"
@@ -445,17 +542,16 @@ def enter_bank_transaction() -> dict:
 def enter_document(drive_files: list[dict] | None = None) -> dict:
     """Prompt for a new document record. Shows a Drive file picker if files are provided.
 
-    When a Drive file is selected:
-    - captured_at is set automatically from the file's createdTime (no prompt)
-    - document_type is auto-accepted when inferred from a recognised subfolder name
+    No document_type prompt — type is determined by OCR (with folder-name as
+    a fallback hint when OCR is inconclusive; see _resolve_type in wf_add_document).
+    When a Drive file is selected, captured_at is set from the file's createdTime.
     """
     from passierschein.domain.enums import DocumentType
     console.rule("[bold cyan]New Document")
 
-    file_path:       str              = ""
-    default_type:    DocumentType     = DocumentType.UNKNOWN
-    captured:        date | None      = None
-    type_confident:  bool             = False
+    file_path:    str          = ""
+    doc_type:     DocumentType = DocumentType.UNKNOWN  # OCR will determine the real type
+    captured:     date | None  = None
 
     if drive_files:
         t = Table(title="Files in Google Drive Inbox", show_lines=True)
@@ -472,8 +568,8 @@ def enter_document(drive_files: list[dict] | None = None) -> dict:
         try:
             idx = int(raw)
             if 1 <= idx <= len(drive_files):
-                chosen      = drive_files[idx - 1]
-                file_path   = chosen["id"]
+                chosen    = drive_files[idx - 1]
+                file_path = chosen["id"]
 
                 # captured_at from Drive createdTime
                 created_str = chosen.get("createdTime") or ""
@@ -481,29 +577,24 @@ def enter_document(drive_files: list[dict] | None = None) -> dict:
                     captured = date.fromisoformat(created_str[:10])
                     console.print(f"  Captured at [dim](Drive ✓)[/dim]: {captured}")
 
-                # Type inference from subfolder — confident only for known folder names
+                # Folder hint — not authoritative; OCR decides the real type.
+                # Stored as the initial Document.document_type so _resolve_type
+                # can fall back to it if OCR fails entirely.
                 folder_path = (chosen.get("folder_path") or "").lower()
                 name_lower  = chosen["name"].lower()
                 if "rechnungen" in folder_path:
-                    default_type, type_confident = DocumentType.INVOICE, True
+                    doc_type = DocumentType.INVOICE
                 elif any(kw in folder_path for kw in ("bescheid", "pkv-abrechnung", "pkv_abrechnung")):
-                    default_type, type_confident = DocumentType.SETTLEMENT_REPORT, True
+                    doc_type = DocumentType.SETTLEMENT_REPORT
                 elif any(kw in name_lower for kw in ("bescheid", "abrechnung", "erstattung", "leistung")):
-                    default_type = DocumentType.SETTLEMENT_REPORT
+                    doc_type = DocumentType.SETTLEMENT_REPORT
                 else:
-                    default_type = DocumentType.INVOICE
+                    doc_type = DocumentType.INVOICE
         except (ValueError, IndexError):
             pass
 
     if not file_path:
         file_path = Prompt.ask("File path")
-
-    # doc_type: auto-accept if folder was unambiguous, otherwise prompt
-    if type_confident:
-        console.print(f"  Document type [dim](folder ✓)[/dim]: [bold]{default_type.value}[/bold]")
-        doc_type = default_type
-    else:
-        doc_type = prompt_enum("Document type", DocumentType, default=default_type)
 
     # captured_at: already set from Drive, otherwise prompt
     if captured is None:
